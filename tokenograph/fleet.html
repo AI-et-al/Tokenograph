@@ -15,8 +15,9 @@ html{color-scheme:dark;background:var(--bg)}
 body{margin:0;background:var(--bg);color:var(--text);font:13px/1.5 var(--mono);-webkit-font-smoothing:antialiased}
 *{box-sizing:border-box}
 .wrap{max-width:1500px;margin:0 auto;padding:44px 48px 56px}
-.logo{width:56px;height:56px;display:block;margin-bottom:28px}
-h1{font:400 28px/1.25 var(--pixel);margin:0 0 10px;color:#ececf1}
+.eyebrow{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;font-size:12px;color:var(--dim);margin-bottom:16px}
+.eyebrow .wm{font:400 18px/1 var(--pixel);color:#ececf1;letter-spacing:.05em}
+h1{font:600 26px/1.3 var(--mono);letter-spacing:-.01em;margin:0 0 12px;color:#ececf1}
 .sub{color:var(--dim);font-size:12px;line-height:1.7}
 .sub b{color:var(--text);font-weight:500}
 .summary{display:flex;gap:22px;flex-wrap:wrap;margin:26px 0 18px;font-size:14px}
@@ -51,11 +52,7 @@ footer b{color:var(--dim);font-weight:500}
 <!--body-->
 <div class="wrap">
   <header>
-    <svg class="logo" viewBox="0 0 8 8" shape-rendering="crispEdges" aria-hidden="true">
-      <rect x="0" y="0" width="1" height="8" fill="#fff"/><rect x="1" y="0" width="4" height="1" fill="#fff"/>
-      <rect x="4" y="1" width="1" height="3" fill="#fff"/><rect x="1" y="3" width="3" height="1" fill="#fff"/>
-      <rect x="6" y="6" width="2" height="2" fill="#fff"/>
-    </svg>
+    <div class="eyebrow"><span class="wm">tokenograph</span><span id="eyebrow-meta"></span></div>
     <h1>fleet</h1>
     <div class="sub" id="subtitle"></div>
   </header>
@@ -81,6 +78,7 @@ function render() {
   const counts = {}; for (const r of rows) { const s = (r.herdr && r.herdr.status) || r.state; counts[s] = (counts[s] || 0) + 1; }
   const cost = rows.reduce((a, r) => a + (r.cost ?? r.cost_reported ?? 0), 0), anyCost = rows.some(r => r.cost != null || r.cost_reported != null);
   const live = D.live ? '<span class="spin" title="live"></span>' : '<span class="snap">snapshot</span>';
+  $('eyebrow-meta').textContent = D.tokenograph ? 'v' + D.tokenograph : '';
   $('subtitle').innerHTML = `${rows.length} sessions · Claude Code <b>${esc(D.sources.claude)}</b> · pi <b>${esc(D.sources.pi)}</b> · herdr ${D.herdr_servers.length ? '<b>' + esc(D.herdr_servers.join(', ')) + '</b>' : '<b>not reachable</b> (states below are read from the transcripts)'} ${live}`;
   $('summary').innerHTML = ['blocked', 'done', 'working', 'idle'].map(s => `<span><span class="pill ${s}">${s}</span><span class="v">${counts[s] || 0}</span></span>`).join('') +
     `<span><span class="k">computed tokens</span><span class="v">${fmtTok(rows.reduce((a, r) => a + r.computed, 0))}</span></span>` +
