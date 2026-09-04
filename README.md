@@ -36,6 +36,7 @@ through `CLAUDE.md`). The evidence behind every claim below is in `docs/field-no
 git clone https://github.com/AI-et-al/tokenograph && cd tokenograph
 python3 -m tokenograph --version              # run from the checkout
 pipx install .                                # or: pip install .  -> a `tokenograph` command
+pipx install --editable .                     # same, but edits to the checkout take effect
 pipx install git+https://github.com/AI-et-al/tokenograph
 ```
 
@@ -114,6 +115,9 @@ single most expensive event a session can have.
 **Troubleshooting.**
 
 - `no sessions found`: check the paths above and the environment variables.
+- `No module named tokenograph`: `python3 -m tokenograph` only works from inside the checkout,
+  the folder that contains `tokenograph/__init__.py`. From anywhere else use the installed
+  `tokenograph` command (`pipx install --editable <path-to-checkout>`).
 - Cost shows `–`: the model is not in the pricing table; pass `--price`.
 - `offline` beside the ring in serve mode: the server stopped; restart it.
 - The fleet says herdr is not reachable: herdr is not running, or its socket is elsewhere;
