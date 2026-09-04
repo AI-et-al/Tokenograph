@@ -1,0 +1,2 @@
+[console_scripts]
+tokenograph = tokenograph:main
