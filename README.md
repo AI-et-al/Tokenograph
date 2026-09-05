@@ -1,4 +1,4 @@
-# tokenograph
+# Tokenograph
 
 Tokenometrics for coding-agent sessions. Point it at a Claude Code transcript, a Codex
 CLI rollout, or a pi session and it renders one page: throughput, an additive wall-clock
