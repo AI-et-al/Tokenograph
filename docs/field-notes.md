@@ -171,7 +171,8 @@ Ordered by how much they change what the tool can tell you.
 2. **Adapters with real timing.** llama.cpp and SGLang report prompt and generation
    timings per request, which is what the original panel's tg/s and pp/s came from. A
    server-log adapter would make those measured rather than estimated for local models.
-   Codex, OpenCode and Gemini CLI sessions are the obvious next transcript formats.
+   OpenCode and Gemini CLI sessions are the obvious next transcript formats. The Codex
+   adapter now recovers its rollout timestamps and exact usage, but not server timings.
 3. **Advice, not only accounting.** A command that reads a session and emits the three
    or four actions with the highest expected saving: which tool results dominate the
    window, whether a compaction is due before a planned environment change, which tools

@@ -226,6 +226,7 @@ class FleetTests(unittest.TestCase):
             th.start()
             old = dict(os.environ)
             os.environ["CLAUDE_CONFIG_DIR"] = str(Path(tmp) / "claude")
+            os.environ["CODEX_HOME"] = str(Path(tmp) / "no-codex")
             os.environ["PI_CODING_AGENT_DIR"] = str(Path(tmp) / "nope")
             os.environ["HERDR_SOCKET_PATH"] = str(sock_path)
             os.environ["XDG_CONFIG_HOME"] = str(Path(tmp) / "xdg")

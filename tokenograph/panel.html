@@ -112,6 +112,7 @@ table.ledger .sw{display:inline-block;width:8px;height:8px;border-radius:2px;mar
 .ctx-notes{color:var(--faint);font-size:11.5px;line-height:1.7;margin-top:18px}
 .ctx-notes b{color:var(--dim);font-weight:500}
 .pill{display:inline-block;font-size:10.5px;padding:1px 7px;border-radius:9px;border:1px solid var(--line);color:var(--dim);margin-left:8px;vertical-align:middle}
+.pill a{color:inherit;text-decoration:none}
 @media (max-width:820px){.ctx-grid{grid-template-columns:1fr}}
 
 footer{border-top:1px solid var(--line);margin-top:8px;padding-top:14px;color:var(--faint);font-size:11.5px;line-height:1.7}
@@ -233,7 +234,7 @@ function renderHeader() {
   $('title').textContent = m.title || 'tokenograph';
   document.title = (m.title ? m.title.slice(0, 60) + ' · ' : '') + 'tokenograph';
   const eb = [];
-  if (m.agent) eb.push(`<b>${esc(m.agent)}</b>`);
+  if (m.agent_label || m.agent) eb.push(`<b>${esc(m.agent_label || m.agent)}</b>`);
   if (m.session_id) eb.push(`session <b>${esc(m.session_id.slice(0, 8))}</b>`);
   if (m.tokenograph) eb.push(`v${esc(m.tokenograph)}`);
   $('eyebrow-meta').innerHTML = eb.join(' · ');
@@ -241,7 +242,7 @@ function renderHeader() {
   if (m.models && m.models.length) bits.push(`model <b>${esc(m.models.join(', '))}</b>`);
   if (m.cwd) bits.push(`cwd <b>${esc(m.cwd)}</b>`);
   if (m.git_branch) bits.push(`branch <b>${esc(m.git_branch)}</b>`);
-  if (m.cli_version) bits.push(`Claude Code <b>${esc(m.cli_version)}</b>`);
+  if (m.cli_version) bits.push(`${esc(m.cli_label || m.agent_label || m.agent)} <b>${esc(m.cli_version)}</b>`);
   if (m.subagent_streams) bits.push(`subagents <b>${m.subagent_streams}</b>`);
   $('subtitle').innerHTML = bits.join(' · ');
 }
@@ -279,7 +280,10 @@ function renderStats() {
   const cost = s.cost;
   if (cost) {
     const p = cost.pricing;
-    html.push('<div class="h cost">COST <span class="pill" title="' + esc(`${p.model}: $${p.in}/M in, $${p.out}/M out, cache read ×${p.read_mult}, cache write ×${p.write_5m_mult} (5m) / ×${p.write_1h_mult} (1h) · ${p.source}`) + '">' + esc(p.source) + '</span></div>');
+    const priceRows = p.rows && p.rows.length ? p.rows : [p];
+    const source = priceRows.map(r => r.source_url ? `<a href="${esc(r.source_url)}" target="_blank" rel="noreferrer">${esc(r.model)}</a>` : esc(r.source)).join(', ');
+    const priceTitle = priceRows.map(r => `${r.model}: $${r.in}/M in, $${r.out}/M out, cache read ×${r.read_mult}, cache write ×${r.write_5m_mult} (5m) / ×${r.write_1h_mult} (1h) · ${r.source}`).join(' | ');
+    html.push('<div class="h cost">COST <span class="pill" title="' + esc(priceTitle) + '">' + source + '</span></div>');
     html.push(kv('total', '$' + cost.total.toFixed(2), { est: true, title: 'input + cache writes + cache reads + output at the pricing shown' }));
     html.push(kv('output', '$' + cost.output.toFixed(2), { color: C.generation, est: true, title: 'completion tokens × output price' }));
     html.push(kv('cache writes', '$' + cost.cache_write.toFixed(2), { color: C.prefill, est: true, title: 'computed prompt tokens written to the cache, at the write premium' }));
@@ -530,8 +534,9 @@ function renderFooter() {
   const parts = [`<b>measured</b> from transcript timestamps and API usage counts`,
     e.phase_method === 'blocks' ? `<b>estimated</b> prefill/decode split, from the visible-text decode speed observed after thinking blocks (${Math.round(e.decode_tok_s)} tok/s)` : e.phase_method === 'regression' ? `<b>estimated</b> prefill/decode split by a latency fit over the session’s requests (decode ~${Math.round(e.decode_tok_s || 0)} tok/s)` : `<b>not separable</b>: prefill (no per-block timing in this transcript)`,
     `reasoning tokens ${e.reasoning_tokens}`, `tool-result tokens at ~4 chars/token`,
+    D.meta.pricing_note ? esc(D.meta.pricing_note) : null,
     `generated ${when.toLocaleString()} · tokenograph ${D.meta.tokenograph}${D.meta.source ? ' · ' + esc(D.meta.source) : ''}`];
-  $('foot').innerHTML = parts.join(' · ');
+  $('foot').innerHTML = parts.filter(Boolean).join(' · ');
 }
 
 
@@ -627,6 +632,12 @@ function renderTools() {
   const L = D.ledger, T = L.tools, el = $('ctx-tools');
   if (!T) { el.innerHTML = ''; return; }
   const rd = L.read_mult, R = T.requests;
+  if (!T.catalog_known) {
+    el.innerHTML = `<h3>tool schemas loaded on demand</h3><div class="verdict">${T.loaded.length} loaded schema${T.loaded.length === 1 ? '' : 's'} were recorded. The full deferred catalog is not recorded by this adapter, so unused-tool counts and a net deferred-vs-direct saving are unknown.</div>` +
+      `<table class="ledger"><tr><th>tool</th><th>schema</th><th>loaded at</th><th>re-sent in</th><th>search overhead</th></tr>` +
+      T.loaded.map(t => `<tr><td class="lab">${esc(t.name)}</td><td>${fmtTok(t.schema)}</td><td>request ${t.loaded_at}</td><td>${t.requests_after} req</td><td>${t.solo ? fmtTok(t.overhead_tokens) + ' tok · ' + fmtDur(t.overhead_s) + ' · own round trip' : fmtTok(t.overhead_tokens) + ' tok · batched with other calls'}</td></tr>`).join('') + '</table>';
+    return;
+  }
   const loadedDelta = T.loaded_direct_eff - T.loaded_deferred_eff, unloadedDelta = T.unloaded_direct_eff - T.unloaded_deferred_eff;
   const net = loadedDelta + unloadedDelta;
   el.innerHTML = `<h3>tool loading · deferred vs. direct</h3>
@@ -639,11 +650,12 @@ function renderTools() {
 }
 function renderCtxNotes() {
   const L = D.ledger, p = D.stats.cost && D.stats.cost.pricing;
+  const priceRows = p && p.rows && p.rows.length ? p.rows : (p ? [p] : []);
   const bits = [`<b>how</b> the window at each request is rebuilt from the transcript: the recorded system prompt, every injected reminder and listing, prompts, assistant text, tool inputs, tool results, images, loaded skills and on-demand tool schemas; thinking is kept while the turn continues. Text is converted at ${L.cpt} chars/token for tool traffic and ${L.cpt_prose} for prose${L.calibrated ? ', calibrated on this session’s warm-cache requests' : ' (defaults)'}`,
     L.tool_block_hint ? `the built-in tool block is ${fmtTok(L.tool_block_hint)} tokens, inferred from what stayed cached through a system-prompt rebuild` : `tool schemas for built-in tools are not recorded, so they show up in “tool schemas & unmeasured”`,
     L.reconciled ? `${L.reconciled} request${L.reconciled === 1 ? '' : 's'} where the estimate exceeded the measured window were scaled to fit` : null,
     `images at ~(w×h)/750 tokens after the model’s downscale`,
-    p ? `cost at $${p.in}/M input, $${p.out}/M output, cache reads ×${p.read_mult}, cache writes ×${p.write_5m_mult} (5 min) / ×${p.write_1h_mult} (1 h), pricing ${p.source}; per-category cost splits each request’s bill by the tokens each category contributed` : `no pricing known for this model: pass --price IN,OUT to cost it`];
+    p ? `${priceRows.length === 1 ? `cost at $${p.in}/M input, $${p.out}/M output, cache reads ×${p.read_mult}, cache writes ×${p.write_5m_mult} (5 min) / ×${p.write_1h_mult} (1 h), pricing ${p.source}` : `cost uses ${priceRows.length} cited per-model price rows`}; per-category cost splits each request’s own bill by the tokens each category contributed` : `no pricing known for this model: pass --price IN,OUT to cost it`];
   $('ctx-notes').innerHTML = bits.filter(Boolean).join(' · ');
 }
 function renderContext() {

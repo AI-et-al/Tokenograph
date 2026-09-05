@@ -1,8 +1,8 @@
 # tokenograph
 
-Tokenometrics for coding-agent sessions. Point it at a Claude Code transcript or a pi
-session and it renders one page: throughput, an additive wall-clock split, token and cost
-accounting, a per-row timeline of every call, and a ledger of what is in the context
+Tokenometrics for coding-agent sessions. Point it at a Claude Code transcript, a Codex
+CLI rollout, or a pi session and it renders one page: throughput, an additive wall-clock
+split, token and cost accounting, a per-row timeline of every call, and a ledger of what is in the context
 window, what each part has cost, and why the cache was rebuilt. It also exports the
 session as a property graph and watches a whole fleet of sessions with herdr's states.
 
@@ -13,7 +13,7 @@ It started as a clean-room equivalent of the run-stats panel Han Xiao posted for
 Python standard library only, no build step.
 
 ```
-python3 -m tokenograph list                          # Claude Code and pi sessions, newest first
+python3 -m tokenograph list                          # Claude Code, Codex CLI and pi, newest first
 python3 -m tokenograph build latest -o panel.html    # self-contained HTML, open it anywhere
 python3 -m tokenograph serve latest --open           # live panel that follows a running session
 python3 -m tokenograph fleet --serve --open          # every session, herdr-style states, live
@@ -22,11 +22,11 @@ python3 -m tokenograph json  <session-id-or-path>    # the computed numbers, for
 ```
 
 `latest`, a session id prefix, a directory, or a path to a `.jsonl` all work. The format
-is detected from the file (`--format claude|pi` to force it). Subagent transcripts stored
+is detected from the file (`--format claude|codex|pi` to force it). Subagent transcripts stored
 next to a Claude Code session are merged in (`--no-subagents` to skip).
 
-Agents starting a session in this folder: read `AGENTS.md` first (Claude Code loads it
-through `CLAUDE.md`). The evidence behind every claim below is in `docs/field-notes.md`.
+Agents starting a session in this folder: read `AGENTS.md` first. The evidence behind
+every claim below is in `docs/field-notes.md`.
 
 ## Using it from the terminal
 
@@ -44,7 +44,8 @@ The examples below use `tokenograph ...`; substitute `python3 -m tokenograph ...
 checkout.
 
 **Find sessions.** Claude Code writes to `~/.claude/projects/<project>/<session>.jsonl`,
-pi to `~/.pi/agent/sessions/<cwd>/<stamp>_<id>.jsonl`. `CLAUDE_CONFIG_DIR` and
+Codex CLI to `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, and pi to
+`~/.pi/agent/sessions/<cwd>/<stamp>_<id>.jsonl`. `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and
 `PI_CODING_AGENT_DIR` are honoured.
 
 ```
@@ -100,10 +101,10 @@ tokenograph graph latest -o session.csv       # session.nodes.csv + session.edge
 
 | flag | effect |
 |---|---|
-| `--title T` | panel title; default is the first prompt, or pi's session name |
+| `--title T` | panel title; default is the first prompt, or the adapter's session name |
 | `--context-window N` | window size for the fill ring; default 200k, or 1M once a request exceeds 200k |
 | `--price IN,OUT[,READ,W5M,W1H]` | $/M tokens and cache multipliers, overriding the built-in dated table |
-| `--format claude\|pi` | force the adapter instead of detecting it |
+| `--format claude\|codex\|pi` | force the adapter instead of detecting it |
 | `--no-subagents` | ignore subagent transcripts stored beside a Claude Code session |
 | `--port`, `--host`, `--interval` | serve options; interval is the browser poll in seconds |
 
@@ -128,9 +129,10 @@ single most expensive event a session can have.
 | harness | support | how to wire it |
 |---|---|---|
 | Claude Code | native | nothing to do; transcripts are read from `~/.claude/projects` |
+| Codex CLI | native | nothing to do; rollouts are read from `~/.codex/sessions` (or `$CODEX_HOME/sessions`) |
 | pi | native | nothing to do; sessions are read from `~/.pi/agent/sessions` |
-| herdr | fleet join | run herdr's own Claude Code and pi integrations (`herdr integration install claude`, `... pi`); they report each pane's session id, and `tokenograph fleet` joins on it and shows herdr's status next to its own |
-| Codex CLI, OpenCode, Gemini CLI, Cursor, aider | not yet | each writes a session log; see "Adding an adapter" |
+| herdr | fleet join | its harness integrations report each pane's own session id; `tokenograph fleet` joins Claude Code, Codex CLI, and pi rows on that id and shows herdr's status next to its own |
+| OpenCode, Gemini CLI, Cursor, aider | not yet | each writes a session log; see "Adding an adapter" |
 | llama.cpp, SGLang, vLLM servers | not yet | the server's per-request timings would make tg/s and pp/s measured instead of estimated; an adapter over the server log or a logging proxy is the path |
 
 What each format records decides what can be measured:
@@ -138,6 +140,13 @@ What each format records decides what can be measured:
 - Claude Code writes one entry per streamed block with a timestamp and exact usage, the
   full system prompt, every injected reminder, and compaction markers. Everything in the
   ledger is possible because of that.
+- Codex CLI writes timestamped `response_item` records and per-request `last_token_usage`
+  inside cumulative `token_count` events. Input includes cached and cache-write subsets;
+  reasoning is encrypted, so only `reasoning_output_tokens` is usable. Older resumed
+  rollouts replay history before the latest `task_started`; newer versions may also write
+  a provisional `token_usage_record`, committed only when its delayed `token_count`
+  matches. The adapter handles both, but no plaintext reasoning ledger item can be
+  reconstructed.
 - pi writes one entry per message with start and end times, usage including its own cost,
   tool results, compactions and model changes, but no system prompt and no per-block
   timing. So for pi the prefill split is a latency fit and the system prompt appears
@@ -145,7 +154,7 @@ What each format records decides what can be measured:
   on pi's fixtures they agree to the cent.
 
 **Adding an adapter.** Write a `_scan_<name>(entries, sub, ctx, stream)` in
-`tokenograph/__init__.py` that fills the same `ctx` the two existing scanners fill:
+`tokenograph/__init__.py` that fills the same `ctx` the existing scanners fill:
 model calls with start and end times and usage, tool calls paired to results, prompts,
 compactions, and ledger items with a category and a size. Add the format to
 `detect_format` and `iter_sessions`. Everything downstream, phases, ledger, graph, fleet,
@@ -163,6 +172,19 @@ completion. COST, when the model's pricing is known: output, cache writes (at th
 or 1-hour write premium the API reported), cache reads (at the read discount), uncached
 input. `--price IN,OUT[,READ_MULT,WRITE5M_MULT,WRITE1H_MULT]` overrides the built-in table,
 which is a dated snapshot.
+
+The OpenAI rows were checked on 2026-09-04 against the official model pages for
+[gpt-5.6-sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol),
+[gpt-5.6-terra](https://developers.openai.com/api/docs/models/gpt-5.6-terra),
+[gpt-5.5](https://developers.openai.com/api/docs/models/gpt-5.5),
+[gpt-5.4](https://developers.openai.com/api/docs/models/gpt-5.4),
+[gpt-5.4-mini](https://developers.openai.com/api/docs/models/gpt-5.4-mini),
+[gpt-5.3-codex](https://developers.openai.com/api/docs/models/gpt-5.3-codex), and
+[gpt-5.2-codex](https://developers.openai.com/api/docs/models/gpt-5.2-codex); cache
+multipliers follow the official [prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching).
+These are Standard API list-price equivalents, not Codex subscription invoices. A model
+without an exact cited row remains unpriced and the panel footer says so; `--price` is the
+only opt-in override.
 
 **Activity.** One row per category over wall-clock time: an "All activity" strip, laps
 numbered in order, the three assistant phases, one row per tool name, compactions,
@@ -194,17 +216,22 @@ API's measured input total drawn over it, and three tables:
 
 - **Model calls.** Claude Code writes each streamed content block as its own entry with a
   timestamp and the request's usage; blocks are grouped by `requestId`. A request starts at
-  the last non-assistant entry before its first block and ends at its last block. pi
-  writes one entry per message; the message carries the request's start time and the entry
-  its end.
+  the last non-assistant entry before its first block and ends at its last block. Codex
+  groups timestamped output items structurally and attaches the next changed per-request
+  usage record; the usage event itself is deliberately not used as the response end.
+  pi writes one entry per message; the message carries the request's start time and the
+  entry its end.
 - **Tool calls.** A `tool_use` block is paired with the `tool_result` carrying its id.
   Claude Code starts a tool as soon as its block has streamed, so calls in one message
-  overlap; pi runs them after the message, one after another. The wall-clock split gives
-  model phases priority over tools where they overlap.
+  overlap; Codex pairs function/custom tools globally by call id (web-search events have
+  no reliable cross-version id, so they are point markers); pi runs tools after the
+  message, one after another. The wall-clock split gives model phases priority over tools
+  where they overlap.
 - **Laps, compactions, idle.** Every user prompt that is not a tool result, a compaction
   summary or an interrupt marker opens a lap. Compactions are `compact_boundary` markers
-  and `isCompactSummary` messages (Claude Code) or `compaction` entries (pi). Idle is time
-  with nothing running, split into waiting for the user and overhead.
+  and `isCompactSummary` messages (Claude Code), encrypted `compacted` records (Codex), or
+  `compaction` entries (pi). Idle is time with nothing running, split into waiting for the
+  user and overhead.
 - **Context ledger.** Every entry that ends up in the prompt becomes an item with a
   category and a size. At each request the window is the latest system prompt snapshot
   plus every item since the last compaction (thinking blocks only while the turn
@@ -253,7 +280,7 @@ shows which tools were loaded solo, at which request, and how many requests re-s
 
 ## Fleet and herdr
 
-`tokenograph fleet` lists every Claude Code and pi session on the machine with a state in
+`tokenograph fleet` lists every Claude Code, Codex CLI, and pi session on the machine with a state in
 [herdr](https://github.com/ogulcancelik/herdr)'s vocabulary, derived from the transcript
 tail: **working** (producing or running a tool), **blocked** (a tool call has waited more
 than 20 s for its result, usually a permission prompt or a question), **done** (the turn
@@ -264,8 +291,8 @@ mode the rows link to live per-session panels.
 When herdr is running, tokenograph also asks it. herdr exposes a newline-delimited JSON
 socket at `$XDG_CONFIG_HOME/herdr/herdr.sock` (or `~/.config/herdr/herdr.sock`, or the
 `HERDR_SOCKET_PATH` a pane inherits); `agent.list` returns every pane's agent, its
-detected status and the agent's own session id, which herdr's Claude Code and pi
-integrations report to it at session start. tokenograph joins on that id (falling back to a
+detected status and the agent's own session id, which herdr's harness integrations report
+at session start. tokenograph joins on that id (falling back to a
 unique working directory) and shows herdr's status next to its own, with herdr's driving
 the ordering. Nothing is written to herdr.
 
@@ -313,7 +340,7 @@ The short list; numbers and evidence in `docs/field-notes.md`, the agent brief i
 
 In order of how much each changes what the tool can tell you: exact token counts through
 the API's counting endpoint; adapters with real server timings for local models and for
-Codex, OpenCode and Gemini CLI; an `advise` command that turns the ledger into the three
+OpenCode and Gemini CLI; an `advise` command that turns the ledger into the three
 actions with the highest expected saving; Claude Code and herdr hooks that surface cost
 and rebuilds where you are looking; fleet economics over time; experiments on the graph
 export such as simulating a forgetting policy against your own sessions; scrubbed,
@@ -325,7 +352,7 @@ shareable sessions and a `--redact` flag for built panels. Details in
 `tokenograph json` emits what the page renders:
 
 ```
-meta    title, agent (claude-code | pi), session id, models, cwd, branch, estimates used
+meta    title, agent (claude-code | codex | pi), adapter labels, session id, models, cwd, branch, estimates used
 base    session start (epoch seconds); all times below are relative to it
 stats   tg_s, pp_s, laps, avg_lap_s, time{...}, tokens{...}, context{...}, counts{...},
         cost{total,input,output,cache_read,cache_write,pricing} or null, cost_reported (pi)
@@ -346,9 +373,9 @@ same stats plus `state`, `herdr` (status, pane, workspace, name) and `age_s`.
 ## Files
 
 ```
-tokenograph.py              adapters (Claude Code, pi), metrics, ledger, fleet, CLI
-panel.html               the session page; build inlines the data into it
-fleet.html               the fleet page
+tokenograph/__init__.py   adapters (Claude Code, Codex CLI, pi), metrics, ledger, fleet, CLI
+tokenograph/panel.html    the session page; build inlines the data into it
+tokenograph/fleet.html    the fleet page
 examples/make_sample.py  synthetic 16h transcript generator with ground-truth timings
 examples/sample-panel.png    the panel built from that synthetic run (screenshot above)
 tests/                   python3 -m unittest discover -s tests
@@ -369,6 +396,7 @@ python3 -m tokenograph build /tmp/sample.jsonl --title "16h long-horizon task on
   cache retention when a system-prompt change happens, otherwise it is the residual.
 - Image tokens follow the documented downscale rule; the API does not report them
   separately, so they cannot be calibrated.
-- The pricing table is a snapshot and does not cover partner platforms; pass `--price`.
+- The pricing table is a dated, cited snapshot and does not cover subscriptions or partner
+  platforms; an unknown model is left unpriced unless `--price` is supplied.
 - Cost is attributed to categories by token share, which is the only split the usage
   counters support.

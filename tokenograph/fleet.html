@@ -78,8 +78,9 @@ function render() {
   const counts = {}; for (const r of rows) { const s = (r.herdr && r.herdr.status) || r.state; counts[s] = (counts[s] || 0) + 1; }
   const cost = rows.reduce((a, r) => a + (r.cost ?? r.cost_reported ?? 0), 0), anyCost = rows.some(r => r.cost != null || r.cost_reported != null);
   const live = D.live ? '<span class="spin" title="live"></span>' : '<span class="snap">snapshot</span>';
+  const sourceHtml = (D.sources || []).map(s => `${esc(s.label)} <b>${esc(s.path)}</b>`).join(' · ');
   $('eyebrow-meta').textContent = D.tokenograph ? 'v' + D.tokenograph : '';
-  $('subtitle').innerHTML = `${rows.length} sessions · Claude Code <b>${esc(D.sources.claude)}</b> · pi <b>${esc(D.sources.pi)}</b> · herdr ${D.herdr_servers.length ? '<b>' + esc(D.herdr_servers.join(', ')) + '</b>' : '<b>not reachable</b> (states below are read from the transcripts)'} ${live}`;
+  $('subtitle').innerHTML = `${rows.length} sessions${sourceHtml ? ' · ' + sourceHtml : ''} · herdr ${D.herdr_servers.length ? '<b>' + esc(D.herdr_servers.join(', ')) + '</b>' : '<b>not reachable</b> (states below are read from the transcripts)'} ${live}`;
   $('summary').innerHTML = ['blocked', 'done', 'working', 'idle'].map(s => `<span><span class="pill ${s}">${s}</span><span class="v">${counts[s] || 0}</span></span>`).join('') +
     `<span><span class="k">computed tokens</span><span class="v">${fmtTok(rows.reduce((a, r) => a + r.computed, 0))}</span></span>` +
     `<span><span class="k">from cache</span><span class="v">${fmtTok(rows.reduce((a, r) => a + r.cached, 0))}</span></span>` +
@@ -92,7 +93,7 @@ function render() {
     const link = D.live ? `<a href="s/${i}/" title="open the session panel">${esc(r.title)}</a>` : esc(r.title);
     html.push(`<tr><td class="l">${state}${hint ? `<div class="meta">${hint}</div>` : ''}</td>
       <td class="l"><div class="title">${link}</div><div class="meta">${esc(r.cwd || '')}${r.branch ? ' · ' + esc(r.branch) : ''} · ${esc((r.session_id || '').slice(0, 8))}</div></td>
-      <td class="l">${esc(r.fmt === 'pi' ? 'pi' : 'claude code')}<div class="meta">${esc((r.models || []).join(', '))}</div></td>
+      <td class="l">${esc(r.agent_label || r.fmt)}<div class="meta">${esc((r.models || []).join(', '))}</div></td>
       <td>${r.laps}</td><td>${fmtDur(r.wall_s)}</td>
       <td>${ring(r.context_pct)}${r.context_pct == null ? '–' : Math.round(r.context_pct * 100) + '%'}<div class="meta">${fmtTok(r.context_used)}</div></td>
       <td>${fmtTok(r.computed)}</td><td>${fmtTok(r.cached)}</td><td>${fmtTok(r.completion)}</td>

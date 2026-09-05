@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """tokenograph: tokenometrics for long-horizon coding-agent sessions.
 
-Telemetry, a context ledger and cost accounting for Claude Code and pi sessions.
+Telemetry, a context ledger and cost accounting for Claude Code, Codex CLI and pi sessions.
 
 Reads Claude Code transcripts (~/.claude/projects/<project>/<session>.jsonl) and
-pi sessions (~/.pi/agent/sessions/<cwd>/<stamp>_<id>.jsonl) and renders one page:
+Codex CLI rollouts (~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl) and pi sessions
+(~/.pi/agent/sessions/<cwd>/<stamp>_<id>.jsonl) and renders one page:
 
   stats      tg/s, pp/s, laps, an additive wall-clock split (prefill / reasoning /
              generation / tools / compaction / idle), token and cost accounting
@@ -59,7 +60,8 @@ DEFAULT_WINDOW = 200_000
 LARGE_WINDOW = 1_000_000
 INTERRUPT_PREFIX = "[Request interrupted by user"
 DEFAULT_CPT = 3.8          # characters per token when the session cannot be calibrated
-PRICING_DATE = "2026-06"   # the table below is a snapshot; override with --price
+PRICING_DATE = "2026-06"   # existing Anthropic table snapshot; override with --price
+OPENAI_PRICING_DATE = "2026-09-04"
 
 # $/M input, $/M output, cache-read multiplier, cache-write 5m multiplier, cache-write 1h multiplier
 PRICING = {
@@ -80,7 +82,27 @@ PRICING = {
     "claude-3-7-sonnet": (3.0, 15.0, 0.1, 1.25, 2.0),
     "claude-haiku-4-5": (1.0, 5.0, 0.1, 1.25, 2.0),
     "claude-3-5-haiku": (0.8, 4.0, 0.1, 1.25, 2.0),
+    # Standard API list prices retrieved on OPENAI_PRICING_DATE. These are estimates for
+    # Codex rollouts, not evidence of the user's subscription invoice. Each row's public
+    # source is carried into the panel through OPENAI_PRICE_URLS.
+    "gpt-5.6-sol": (4.0, 20.0, 0.1, 1.25, 1.25),
+    "gpt-5.6-terra": (2.0, 12.0, 0.1, 1.25, 1.25),
+    "gpt-5.5": (5.0, 30.0, 0.1, 1.0, 1.0),
+    "gpt-5.4": (2.5, 15.0, 0.1, 1.0, 1.0),
+    "gpt-5.4-mini": (0.75, 4.5, 0.1, 1.0, 1.0),
+    "gpt-5.3-codex": (1.75, 14.0, 0.1, 1.0, 1.0),
+    "gpt-5.2-codex": (1.75, 14.0, 0.1, 1.0, 1.0),
 }
+
+OPENAI_PRICE_URLS = {
+    name: f"https://developers.openai.com/api/docs/models/{name}" for name in (
+        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
+        "gpt-5.3-codex", "gpt-5.2-codex",
+    )
+}
+OPENAI_LONG_CONTEXT_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4"}
+OPENAI_LONG_CONTEXT_THRESHOLD = 272_000
+UNPRICED_MODELS = {"gpt-5.3-codex-spark", "codex-auto-review"}
 
 # --------------------------------------------------------------------------- utils
 
@@ -125,6 +147,14 @@ def pi_sessions_dir() -> Path:
     return Path(os.environ.get("PI_CODING_AGENT_DIR") or (Path.home() / ".pi" / "agent")) / "sessions"
 
 
+def codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+
+
+def codex_sessions_dir() -> Path:
+    return codex_home() / "sessions"
+
+
 def text_of(content) -> str:
     """Flatten message content (string or block list) to the text it carries."""
     if isinstance(content, str):
@@ -136,7 +166,7 @@ def text_of(content) -> str:
                 out.append(block)
             elif isinstance(block, dict):
                 kind = block.get("type")
-                if kind == "text":
+                if kind in ("text", "input_text", "output_text"):
                     out.append(block.get("text") or "")
                 elif kind == "tool_result":
                     out.append(text_of(block.get("content")))
@@ -218,7 +248,7 @@ def clean_prompt(text: str, limit: int = 140) -> str:
     return text[:limit]
 
 
-_LABEL_KEYS = ("command", "file_path", "path", "pattern", "query", "url", "notebook_path",
+_LABEL_KEYS = ("command", "cmd", "file_path", "path", "pattern", "query", "url", "notebook_path",
                "skill", "subagent_type", "prompt", "description", "message", "text", "content")
 
 
@@ -263,20 +293,33 @@ def _title_from(text: str, limit: int = 64) -> str:
 # --------------------------------------------------------------------------- pricing
 
 def pricing_for(model, override=None):
-    """(in $/M, out $/M, read mult, write-5m mult, write-1h mult, label) or None."""
+    """Rates plus a dated source label, URL and matched key, or None."""
     if override:
-        return tuple(override) + ("--price",)
+        return tuple(override) + ("--price", None, "--price")
     if not model:
         return None
-    key = re.sub(r"\[.*?\]", "", str(model)).strip().lower()
-    key = re.sub(r"-\d{8}$", "", key)
+    model_id = str(model).strip().lower()
+    # OpenAI rows are closed-world: an unpublished suffix may be a materially different
+    # product, so only the exact identifier on the cited public model page is priced.
+    if model_id in OPENAI_PRICE_URLS:
+        row = PRICING[model_id]
+        return row + (f"OpenAI model page · retrieved {OPENAI_PRICING_DATE}",
+                      OPENAI_PRICE_URLS[model_id], model_id)
+    if model_id.startswith("gpt-") or model_id.startswith("codex-") \
+            or any(model_id == name or model_id.startswith(name + "-") for name in UNPRICED_MODELS):
+        return None
+    raw_key = re.sub(r"\[.*?\]", "", model_id)
+    key = re.sub(r"-\d{8}$", "", raw_key)
     best = None
     for name, row in PRICING.items():
-        if key.startswith(name) and (best is None or len(name) > len(best[0])):
+        if name in OPENAI_PRICE_URLS:
+            continue
+        if (key == name or key.startswith(name + "-")) and (best is None or len(name) > len(best[0])):
             best = (name, row)
     if not best:
         return None
-    return best[1] + (f"table {PRICING_DATE}",)
+    name, row = best
+    return row + (f"table {PRICING_DATE}", None, name)
 
 
 def parse_price(text):
@@ -292,7 +335,7 @@ def parse_price(text):
 # --------------------------------------------------------------------------- discovery
 
 def iter_sessions():
-    """Claude Code and pi sessions on this machine, newest first."""
+    """Claude Code, Codex CLI and pi sessions on this machine, newest first."""
     found = []
     root = projects_dir()
     if root.is_dir():
@@ -316,11 +359,31 @@ def iter_sessions():
             sid = f.stem.split("_", 1)[1] if "_" in f.stem else f.stem
             found.append({"path": f, "fmt": "pi", "project": f.parent.name, "session_id": sid,
                           "size": st.st_size, "mtime": st.st_mtime})
+    croot = codex_sessions_dir()
+    if croot.is_dir():
+        for f in croot.glob("*/*/*/rollout-*.jsonl"):
+            try:
+                st = f.stat()
+                with open(f, encoding="utf-8", errors="replace") as fh:
+                    first = json.loads(fh.readline())
+            except (OSError, ValueError):
+                continue
+            payload = first.get("payload") if isinstance(first, dict) and first.get("type") == "session_meta" \
+                and isinstance(first.get("payload"), dict) else {}
+            sid = payload.get("id") or f.stem
+            cwd = payload.get("cwd")
+            project = Path(cwd).name if isinstance(cwd, str) and cwd else f.parent.name
+            found.append({"path": f, "fmt": "codex", "project": project, "session_id": sid,
+                          "size": st.st_size, "mtime": st.st_mtime})
     found.sort(key=lambda s: s["mtime"], reverse=True)
     return found
 
 
 def detect_format(entries, path=None) -> str:
+    for e in entries[:5]:
+        if isinstance(e, dict) and e.get("type") == "session_meta" and isinstance(e.get("payload"), dict) \
+                and e["payload"].get("id"):
+            return "codex"
     if path and ".pi" in str(path).split(os.sep):
         return "pi"
     for e in entries[:5]:
@@ -333,8 +396,56 @@ def detect_format(entries, path=None) -> str:
     return "claude"
 
 
+def _first_codex_prompt(path: Path, legacy: bool, max_lines: int) -> str:
+    """Prefer the UI user_message while retaining response-item text as fallback."""
+    seen_turn = False
+    active = not legacy
+    fallback = ""
+    preferred = ""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for i, line in enumerate(fh):
+            if not legacy and i >= max_lines:
+                break
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            payload = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+            if e.get("type") == "event_msg" and payload.get("type") == "task_started" and legacy:
+                active, seen_turn, fallback, preferred = True, False, "", ""
+                continue
+            if not active:
+                continue
+            if e.get("type") == "turn_context":
+                seen_turn = True
+                continue
+            if e.get("type") == "event_msg" and payload.get("type") == "user_message":
+                text = clean_prompt(payload.get("message") or "", 90)
+                if text and not preferred:
+                    preferred = text
+                    if not legacy:
+                        return preferred
+                continue
+            if e.get("type") == "response_item" and payload.get("type") == "message" \
+                    and payload.get("role") == "user" and seen_turn:
+                text = clean_prompt(text_of(payload.get("content")), 90)
+                if text and not fallback:
+                    fallback = text
+    return preferred or fallback
+
+
 def first_prompt(path: Path, max_lines: int = 400) -> str:
+    codex_turn = False
+    codex_fallback = ""
     try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            try:
+                first = json.loads(fh.readline())
+            except ValueError:
+                first = None
+        if isinstance(first, dict) and first.get("type") == "session_meta" \
+                and isinstance(first.get("payload"), dict) and first["payload"].get("id"):
+            return _first_codex_prompt(path, first["payload"].get("history_mode") == "legacy", max_lines)
         with open(path, encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh):
                 if i >= max_lines:
@@ -343,6 +454,21 @@ def first_prompt(path: Path, max_lines: int = 400) -> str:
                     e = json.loads(line)
                 except ValueError:
                     continue
+                if e.get("type") == "turn_context":
+                    codex_turn = True
+                    continue
+                if e.get("type") == "event_msg" and isinstance(e.get("payload"), dict) \
+                        and e["payload"].get("type") == "user_message":
+                    txt = clean_prompt(e["payload"].get("message") or "", 90)
+                    if txt:
+                        return txt
+                if e.get("type") == "response_item" and isinstance(e.get("payload"), dict):
+                    item = e["payload"]
+                    if item.get("type") == "message" and item.get("role") == "user":
+                        txt = clean_prompt(text_of(item.get("content")), 90)
+                        if txt and codex_turn:
+                            return txt
+                        codex_fallback = codex_fallback or txt
                 if e.get("type") == "message" and isinstance(e.get("message"), dict) and e["message"].get("role") == "user":
                     txt = clean_prompt(text_of(e["message"].get("content")), 90)
                     if txt:
@@ -358,7 +484,7 @@ def first_prompt(path: Path, max_lines: int = 400) -> str:
                     return txt
     except OSError:
         pass
-    return ""
+    return codex_fallback
 
 
 def resolve_session(arg: str) -> Path:
@@ -373,7 +499,7 @@ def resolve_session(arg: str) -> Path:
     sessions = iter_sessions()
     if arg == "latest":
         if not sessions:
-            raise SystemExit(f"no sessions found under {projects_dir()} or {pi_sessions_dir()}")
+            raise SystemExit(f"no sessions found under {projects_dir()}, {codex_sessions_dir()} or {pi_sessions_dir()}")
         return sessions[0]["path"]
     matches = [s for s in sessions if s["session_id"].startswith(arg)]
     if len(matches) == 1:
@@ -437,7 +563,8 @@ def _new_ctx():
     return {"models": [], "tools": [], "prompts": [], "interrupts": [], "errors": [],
             "compact_boundaries": [], "compact_summaries": [], "compact_events": [], "meta": {},
             "open_tools": [], "tool_chars": 0, "items": [], "snapshots": [], "tool_records": [],
-            "deferred_listing": [], "model_changes": [], "reported_cost": 0.0, "n_entries": 0}
+            "deferred_listing": [], "model_changes": [], "reported_cost": 0.0, "n_entries": 0,
+            "active_start_ts": None}
 
 
 def _item(ctx, idx, ts, group, sub, chars=0, img=0, extra=None):
@@ -452,6 +579,19 @@ def _bump(ctx, key, ts):
     cur = ctx.get(key)
     if ts is not None:
         ctx[key] = ts if cur is None else max(cur, ts)
+
+
+ADAPTER_META = {
+    "claude": {"agent": "claude-code", "agent_label": "Claude Code", "cli_label": "Claude Code"},
+    "codex": {"agent": "codex", "agent_label": "Codex CLI", "cli_label": "Codex CLI"},
+    "pi": {"agent": "pi", "agent_label": "pi", "cli_label": "pi"},
+}
+
+
+def _set_adapter_meta(meta, fmt):
+    meta.setdefault("fmt", fmt)
+    for key, value in ADAPTER_META[fmt].items():
+        meta.setdefault(key, value)
 
 
 def _scan_claude(entries, sub: bool, ctx: dict, stream: str = "main"):
@@ -475,7 +615,7 @@ def _scan_claude(entries, sub: bool, ctx: dict, stream: str = "main"):
                              ("cli_version", "version")):
                 if key not in meta and e.get(src):
                     meta[key] = e[src]
-            meta.setdefault("fmt", "claude")
+            _set_adapter_meta(meta, "claude")
 
         if kind == "assistant":
             msg = e.get("message") or {}
@@ -665,7 +805,7 @@ def _scan_pi(entries, sub: bool, ctx: dict, stream: str = "main"):
         ts = parse_ts(e.get("timestamp"))
         if kind == "session":
             if not sub:
-                meta.setdefault("fmt", "pi")
+                _set_adapter_meta(meta, "pi")
                 meta.setdefault("session_id", e.get("id"))
                 meta.setdefault("cwd", e.get("cwd"))
                 if e.get("modelId"):
@@ -788,8 +928,545 @@ def _scan_pi(entries, sub: bool, ctx: dict, stream: str = "main"):
         ctx["open_tools"].extend(last_assistant["pending"].values())
 
 
+def _codex_arg(raw):
+    if isinstance(raw, (dict, list)):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except ValueError:
+            return raw
+    return raw
+
+
+def _codex_label(raw):
+    value = _codex_arg(raw)
+    if isinstance(value, dict):
+        return tool_label(value)
+    if isinstance(value, list):
+        return clean_prompt(json.dumps(value, ensure_ascii=False), 140)
+    return clean_prompt((str(value or "").splitlines() or [""])[0], 140)
+
+
+def _codex_chars(value):
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, list):
+        text = text_of(value)
+        return len(text) if text else sum(_codex_chars(v) for v in value)
+    if value is None:
+        return 0
+    if isinstance(value, dict) and value.get("type") in ("image", "input_image"):
+        return 0
+    if isinstance(value, dict):
+        safe = {k: v for k, v in value.items() if k not in ("data", "image_url")}
+        return len(json.dumps(safe, ensure_ascii=False))
+    return len(json.dumps(value, ensure_ascii=False))
+
+
+def _scan_codex(entries, sub: bool, ctx: dict, stream: str = "main"):
+    """One pass over a Codex CLI rollout, across the legacy and current envelopes.
+
+    `response_item` timestamps delimit model output and tools. Per-request usage comes
+    from changed `token_count` totals (or the 0.153+ `token_usage_record` fast path).
+    Reasoning bytes are encrypted: only their timestamp and reported token count are used.
+    """
+    meta = ctx["meta"]
+    ctx["n_entries"] += len(entries)
+    current_model = None
+    last_input_ts = None
+    last_any_ts = None
+    pending_model = None
+    last_model = None
+    last_usage_idx = -1
+    unassigned_models = []
+    pending_tools = {}
+    tools_by_id = {}
+    prompt_seen = {}
+    last_prompt = None
+    seen_turn = False
+    seen_identity = bool(meta.get("session_id"))
+    provisional_sections = []
+    system_sections = []
+    have_developer_items = False
+    last_total_sig = None
+    event_agent = None
+    event_reasoning_ts = None
+    last_fast_sig = None
+    fast_model = None
+    first_meta_payload = next((e.get("payload") for e in entries if isinstance(e, dict)
+                               and e.get("type") == "session_meta" and isinstance(e.get("payload"), dict)), {})
+    legacy = first_meta_payload.get("history_mode") == "legacy"
+    legacy_starts = [i for i, e in enumerate(entries) if isinstance(e, dict) and e.get("type") == "event_msg"
+                     and isinstance(e.get("payload"), dict) and e["payload"].get("type") == "task_started"]
+    activity_start = max(legacy_starts) if legacy and legacy_starts else 0
+    if legacy and legacy_starts:
+        ctx["active_start_ts"] = parse_ts(entries[activity_start].get("timestamp"))
+
+    def record_snapshot(idx, ts, sections):
+        if sub or not sections:
+            return
+        digest = hashlib.sha1(json.dumps(sections).encode()).hexdigest()[:12]
+        if ctx["snapshots"] and ctx["snapshots"][-1]["hash"] == digest:
+            return
+        ctx["snapshots"].append({"idx": idx, "ts": ts, "sections": list(sections), "hash": digest})
+
+    def content_sections(content, prefix):
+        blocks = content if isinstance(content, list) else [{"type": "input_text", "text": content or ""}]
+        out = []
+        for n, block in enumerate(blocks, 1):
+            if not isinstance(block, dict):
+                continue
+            text = block.get("text") if block.get("type") in ("text", "input_text", "output_text") else ""
+            if not isinstance(text, str) or not text:
+                continue
+            first = (text.strip().splitlines() or [""])[0]
+            out.append((clean_prompt(first, 60) or f"{prefix} {n}", len(text)))
+        return out
+
+    def add_prompt(idx, ts, text, source="response"):
+        nonlocal last_input_ts, last_prompt
+        text = text if isinstance(text, str) else text_of(text)
+        stripped = text.strip()
+        if not stripped:
+            return
+        if last_prompt is not None and (ts is None or last_prompt["ts"] is None
+                                        or abs(ts - last_prompt["ts"]) <= 2.0):
+            previous = last_prompt["text"]
+            if stripped.startswith(previous) or previous.startswith(stripped):
+                n = max(last_prompt["record"]["ch"], len(text))
+                last_prompt["record"]["ch"] = n
+                last_prompt["item"]["ch"] = n
+                if source == "event":
+                    last_prompt["record"]["l"] = clean_prompt(stripped)
+                if len(stripped) > len(previous):
+                    last_prompt["text"] = stripped
+                last_prompt["ts"] = ts
+                last_input_ts = ts if ts is not None else last_input_ts
+                return
+        sig = hashlib.sha1(stripped.encode()).hexdigest()
+        prev = prompt_seen.get(sig)
+        if prev is not None and (ts is None or prev is None or abs(ts - prev) <= 2.0):
+            last_input_ts = ts if ts is not None else last_input_ts
+            return
+        prompt_seen[sig] = ts
+        if not sub:
+            record = {"k": "p", "t0": ts, "t1": ts, "l": clean_prompt(stripped), "ch": len(text)}
+            ctx["prompts"].append(record)
+            item = _item(ctx, idx, ts, "prompt", None, len(text))
+            last_prompt = {"text": stripped, "ts": ts, "record": record, "item": item}
+        if ts is not None:
+            last_input_ts = ts
+
+    def ensure_model(idx, ts):
+        nonlocal pending_model
+        if pending_model is None:
+            t0 = last_input_ts if last_input_ts is not None else (last_any_ts if last_any_ts is not None else ts)
+            pending_model = {
+                "k": "m", "rid": f"{stream}:{idx}", "t0": t0, "t1": ts, "blocks": [],
+                "usage": None, "model": current_model, "sub": int(sub), "err": 0, "stop": None,
+                "think_chars": 0, "text_chars": 0, "tools": [], "stream": stream, "idx": idx,
+                "fmt": "codex", "context_window": None,
+            }
+            ctx["models"].append(pending_model)
+        if ts is not None:
+            pending_model["t1"] = ts if pending_model["t1"] is None else max(pending_model["t1"], ts)
+        if current_model:
+            pending_model["model"] = current_model
+        return pending_model
+
+    def close_model():
+        nonlocal pending_model
+        if pending_model is not None:
+            unassigned_models.append(pending_model)
+            pending_model = None
+
+    def usage_sig(usage):
+        if not isinstance(usage, dict):
+            return None
+        return tuple(int(usage.get(k) or 0) for k in (
+            "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+            "output_tokens", "reasoning_output_tokens"))
+
+    def finish_model(usage, window=None, usage_idx=None, provisional=False):
+        nonlocal pending_model, last_model, last_usage_idx, event_agent, event_reasoning_ts
+        if not isinstance(usage, dict):
+            return None
+        target = pending_model if pending_model is not None and pending_model["idx"] > last_usage_idx else None
+        if target is None:
+            target = next((call for call in reversed(unassigned_models)
+                           if call.get("usage") is None and call["idx"] > last_usage_idx), None)
+        if target is None and event_agent is not None:
+            idx, ts, text = event_agent
+            target = ensure_model(idx, ts)
+            if event_reasoning_ts is not None:
+                target["blocks"].append((event_reasoning_ts, "thinking"))
+            target["text_chars"] += len(text)
+            target["blocks"].append((ts, "text"))
+            if not sub and text:
+                _item(ctx, idx, ts, "assistant", None, len(text))
+        if target is None:
+            if last_model is not None and window:
+                last_model["context_window"] = int(window)
+            return None
+        if provisional:
+            target["_fast_pending"] = True
+            target["_fast_prior_stop"] = target.get("stop")
+        target["usage"] = usage
+        if window:
+            target["context_window"] = int(window)
+        if target["stop"] is None:
+            target["stop"] = "tool_use" if target["tools"] else "end_turn"
+        last_model = target
+        if pending_model is target:
+            pending_model = None
+        if usage_idx is not None:
+            last_usage_idx = max(last_usage_idx, usage_idx)
+        event_agent = None
+        event_reasoning_ts = None
+        return target
+
+    def merge_fast_tail(window=None):
+        """Fold output emitted after an early 0.153+ usage record into that response."""
+        nonlocal pending_model
+        if fast_model is None:
+            return
+        tails = [c for c in list(ctx["models"])
+                 if c is not fast_model and c.get("usage") is None and c["idx"] > fast_model["idx"]]
+        for tail in tails:
+            if tail.get("t1") is not None:
+                fast_model["t1"] = max(fast_model["t1"], tail["t1"])
+            fast_model["blocks"].extend(tail["blocks"])
+            fast_model["think_chars"] += tail["think_chars"]
+            fast_model["text_chars"] += tail["text_chars"]
+            fast_model["tools"].extend(tail["tools"])
+            fast_model["err"] = int(bool(fast_model["err"] or tail["err"]))
+            if tail.get("stop") is not None:
+                fast_model["stop"] = tail["stop"]
+            for tool in ctx["tools"]:
+                if tool.get("_rid") == tail["rid"]:
+                    tool["_rid"] = fast_model["rid"]
+            ctx["models"].remove(tail)
+            if tail in unassigned_models:
+                unassigned_models.remove(tail)
+            if pending_model is tail:
+                pending_model = None
+        if window:
+            fast_model["context_window"] = int(window)
+
+    def start_tool(idx, ts, payload, ptype):
+        call = ensure_model(idx, ts)
+        raw = payload.get("arguments") if ptype == "function_call" else payload.get("input")
+        if ptype == "tool_search_call":
+            raw = payload.get("arguments") or payload.get("input") or payload.get("query")
+        elif ptype == "web_search_call":
+            raw = payload.get("action") or payload.get("query")
+        name = payload.get("name") or {
+            "tool_search_call": "tool_search", "web_search_call": "web_search",
+        }.get(ptype, "tool")
+        call_id = payload.get("call_id") or payload.get("id")
+        in_ch = _codex_chars(raw)
+        tc = {"k": "t", "n": name, "t0": ts, "t1": None, "l": _codex_label(raw),
+              "sub": int(sub), "err": int(payload.get("status") in ("failed", "error")),
+              "ch": 0, "id": call_id, "open": 0, "idx": idx, "in_ch": in_ch,
+              "_rid": call["rid"], "_raw": raw}
+        ctx["tools"].append(tc)
+        if call_id:
+            tools_by_id[call_id] = tc
+        if ptype == "web_search_call":
+            # The corresponding event has no stable call id in several CLI versions.
+            # Keep the activity marker without inventing a wall-clock interval.
+            tc["t1"] = ts
+        elif call_id:
+            pending_tools[call_id] = tc
+        call["blocks"].append((ts, "tool_use"))
+        call["tools"].append(name)
+        call["stop"] = "tool_use"
+        if not sub:
+            _item(ctx, idx, ts, "tool_input", name, in_ch)
+
+    def finish_tool(idx, ts, payload):
+        nonlocal last_input_ts
+        call_id = payload.get("call_id") or payload.get("id")
+        tc = pending_tools.pop(call_id, None)
+        is_search = payload.get("type") == "tool_search_output"
+        output = payload.get("tools") if is_search else payload.get("output")
+        chars = _codex_chars(output)
+        ctx["tool_chars"] += chars
+        name = tc["n"] if tc else "tool"
+        if not sub and not is_search:
+            _item(ctx, idx, ts, "tool_result", name, chars)
+        if is_search and isinstance(output, list):
+            for group in output:
+                if not isinstance(group, dict):
+                    continue
+                schemas = group.get("tools") if isinstance(group.get("tools"), list) else [group]
+                for schema in schemas:
+                    if not isinstance(schema, dict):
+                        continue
+                    schema_name = schema.get("name") or group.get("name") or "tool"
+                    schema_chars = len(json.dumps(schema, ensure_ascii=False))
+                    ctx["tool_records"].append({"name": schema_name, "ch": schema_chars,
+                                                "idx": idx, "ts": ts})
+                    if not sub:
+                        _item(ctx, idx, ts, "tool_schema", schema_name, schema_chars)
+        if tc is not None:
+            tc["t1"] = ts
+            tc["ch"] = chars
+            tc["err"] = int(bool(tc["err"] or payload.get("is_error") or payload.get("error")
+                                   or payload.get("status") in ("failed", "error")))
+        if ts is not None:
+            last_input_ts = ts
+
+    def mark_item_failure(payload):
+        """Join current structured completion failures without parsing result text."""
+        item = payload.get("item") if isinstance(payload.get("item"), dict) else {}
+        failed = bool(item.get("error") or item.get("status") in ("failed", "error")
+                      or item.get("exit_code") not in (None, 0))
+        if not failed:
+            return
+        open_tools = list(pending_tools.values())
+        matches = []
+        if item.get("type") == "CommandExecution":
+            command = item.get("command") if isinstance(item.get("command"), list) else []
+            needle = str(command[-1]) if command else ""
+            compatible = [t for t in open_tools if t["n"] in ("exec", "exec_command")]
+            for tool in compatible:
+                raw = _codex_arg(tool.get("_raw"))
+                direct = raw.get("cmd") or raw.get("command") if isinstance(raw, dict) else None
+                if (direct is not None and str(direct) == needle) \
+                        or (isinstance(raw, str) and needle and needle in raw):
+                    matches.append(tool)
+            if not matches and len(compatible) == 1:
+                matches = compatible
+        elif item.get("type") == "McpToolCall":
+            tool_name = item.get("tool")
+            arguments = item.get("arguments")
+            compatible = [t for t in open_tools if t["n"] == tool_name or t["n"] == "exec"]
+            for tool in compatible:
+                raw = _codex_arg(tool.get("_raw"))
+                if tool["n"] == tool_name and raw == arguments:
+                    matches.append(tool)
+                    continue
+                if tool["n"] == "exec" and isinstance(raw, str):
+                    leaf = str(tool_name or "").split(".")[-1].replace("-", "_")
+                    scalar_args = [str(v) for v in (arguments or {}).values()
+                                   if isinstance(v, (str, int, float, bool))]
+                    if leaf and leaf in raw and all(value in raw for value in scalar_args):
+                        matches.append(tool)
+            if not matches and len(compatible) == 1:
+                matches = compatible
+        if len(matches) == 1:
+            matches[0]["err"] = 1
+
+    for idx, e in enumerate(entries):
+        if not isinstance(e, dict):
+            continue
+        kind = e.get("type")
+        payload = e.get("payload") if isinstance(e.get("payload"), dict) else {}
+        ts = parse_ts(e.get("timestamp"))
+        prev_any_ts = last_any_ts
+
+        if kind == "session_meta":
+            if not sub and not seen_identity:
+                _set_adapter_meta(meta, "codex")
+                meta["session_id"] = payload.get("id")
+                meta["cwd"] = payload.get("cwd")
+                meta["cli_version"] = payload.get("cli_version")
+                git = payload.get("git") if isinstance(payload.get("git"), dict) else {}
+                meta["git_branch"] = git.get("branch")
+                meta["originator"] = payload.get("originator")
+                seen_identity = True
+                base = payload.get("base_instructions")
+                base_text = base.get("text") if isinstance(base, dict) else base
+                if isinstance(base_text, str) and base_text:
+                    provisional_sections = [("base instructions", len(base_text))]
+                    record_snapshot(idx, ts, provisional_sections)
+            if ts is not None:
+                last_any_ts = ts if last_any_ts is None else max(last_any_ts, ts)
+            continue
+
+        # Legacy resumed rollouts embed an entire old conversation before the last
+        # task_started marker. None of those replay records belongs to this file's
+        # measured turn or ledger.
+        if idx < activity_start:
+            if ts is not None:
+                last_any_ts = ts if last_any_ts is None else max(last_any_ts, ts)
+            continue
+
+        if kind == "turn_context":
+            close_model()
+            model = payload.get("model")
+            if model and model != current_model:
+                current_model = model
+                ctx["model_changes"].append({"ts": ts, "idx": idx, "model": model, "provider": "openai"})
+            if not sub and payload.get("cwd"):
+                meta.setdefault("cwd", payload["cwd"])
+            seen_turn = True
+            if ts is not None:
+                last_input_ts = ts if last_input_ts is None else max(last_input_ts, ts)
+
+        elif kind == "response_item":
+            ptype = payload.get("type")
+            if ptype == "message":
+                role = payload.get("role")
+                content = payload.get("content")
+                if role == "developer":
+                    close_model()
+                    if not have_developer_items:
+                        system_sections = list(provisional_sections)
+                        have_developer_items = True
+                    system_sections.extend(content_sections(content, "developer instructions"))
+                    record_snapshot(idx, ts, system_sections)
+                    if ts is not None:
+                        last_input_ts = ts if last_input_ts is None else max(last_input_ts, ts)
+                elif role == "user":
+                    close_model()
+                    text = text_of(content)
+                    if seen_turn and idx >= activity_start:
+                        add_prompt(idx, ts, text)
+                    elif not sub and text:
+                        _item(ctx, idx, ts, "attach", "session_context", len(text))
+                    if ts is not None:
+                        last_input_ts = ts if last_input_ts is None else max(last_input_ts, ts)
+                elif role == "assistant":
+                    call = ensure_model(idx, ts)
+                    n = len(text_of(content))
+                    if n:
+                        call["text_chars"] += n
+                        call["blocks"].append((ts, "text"))
+                        if not sub:
+                            _item(ctx, idx, ts, "assistant", None, n)
+                    if payload.get("phase") == "final":
+                        call["stop"] = "end_turn"
+            elif ptype == "reasoning":
+                call = ensure_model(idx, ts)
+                call["blocks"].append((ts, "thinking"))
+            elif ptype in ("function_call", "custom_tool_call", "tool_search_call", "web_search_call"):
+                start_tool(idx, ts, payload, ptype)
+            elif ptype in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
+                close_model()
+                finish_tool(idx, ts, payload)
+            elif ptype == "agent_message":
+                # Multi-agent handoff/replay input, not assistant model output.
+                close_model()
+                n = _codex_chars(payload.get("content"))
+                if not sub and n:
+                    _item(ctx, idx, ts, "custom", "agent message", n)
+                if ts is not None:
+                    last_input_ts = ts
+
+        elif kind == "token_usage_record":
+            usage = payload.get("usage")
+            if idx >= activity_start and isinstance(usage, dict) and int(usage.get("output_tokens") or 0) > 0:
+                target = finish_model(usage, usage_idx=idx, provisional=True)
+                last_fast_sig = usage_sig(usage) if target is not None else None
+                fast_model = target
+
+        elif kind == "event_msg":
+            etype = payload.get("type")
+            if etype == "user_message":
+                close_model()
+                if idx >= activity_start:
+                    add_prompt(idx, ts, payload.get("message") or "", source="event")
+            elif etype == "token_count":
+                info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+                usage = info.get("last_token_usage")
+                total = info.get("total_token_usage")
+                total_sig = usage_sig(total)
+                changed = total_sig is not None and total_sig != last_total_sig
+                if total_sig is not None:
+                    last_total_sig = total_sig
+                window = info.get("model_context_window")
+                fast_match = isinstance(usage, dict) and last_fast_sig is not None \
+                    and usage_sig(usage) == last_fast_sig
+                if idx >= activity_start and fast_match:
+                    merge_fast_tail(window)
+                    if fast_model is not None:
+                        fast_model["_fast_pending"] = False
+                        fast_model.pop("_fast_prior_stop", None)
+                    last_fast_sig = None
+                    fast_model = None
+                elif idx >= activity_start and changed and isinstance(usage, dict) and int(usage.get("output_tokens") or 0) > 0:
+                    before = last_model
+                    finish_model(usage, window, usage_idx=idx)
+                    if last_model is before and last_model is not None \
+                            and usage_sig(last_model.get("usage")) == usage_sig(usage) and window:
+                        last_model["context_window"] = int(window)
+                elif last_model is not None and window:
+                    last_model["context_window"] = int(window)
+            elif etype == "agent_message":
+                text = payload.get("message") or ""
+                if isinstance(text, str):
+                    event_agent = (idx, ts, text)
+            elif etype == "agent_reasoning":
+                event_reasoning_ts = ts
+            elif etype == "item_completed":
+                mark_item_failure(payload)
+            elif etype == "turn_aborted":
+                label = clean_prompt(str(payload.get("message") or payload.get("reason") or "interrupted"), 160)
+                ctx["interrupts"].append({"k": "x", "t0": ts, "t1": ts, "sub": int(sub), "l": label})
+                if pending_model is not None:
+                    pending_model["stop"] = "interrupted"
+            elif etype == "error":
+                label = clean_prompt(str(payload.get("message") or payload.get("reason") or etype), 160)
+                ctx["errors"].append({"k": "e", "t0": ts, "t1": ts, "sub": int(sub), "l": label})
+                if pending_model is not None:
+                    pending_model["err"] = 1
+                    pending_model["stop"] = "error"
+            elif etype == "web_search_end":
+                pass
+            elif etype in ("exec_command_end", "patch_apply_end", "mcp_tool_call_end",
+                           "dynamic_tool_call_response"):
+                call_id = payload.get("call_id")
+                tc = tools_by_id.get(call_id)
+                if tc is not None:
+                    code = payload.get("exit_code")
+                    failed = bool(payload.get("error") or (code not in (None, 0)))
+                    if etype == "patch_apply_end":
+                        failed = failed or payload.get("success") is False
+                    elif etype == "dynamic_tool_call_response":
+                        failed = failed or payload.get("success") is False
+                    elif etype == "mcp_tool_call_end":
+                        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+                        ok = result.get("Ok") if isinstance(result.get("Ok"), dict) else {}
+                        failed = failed or "Err" in result or bool(ok.get("isError"))
+                    tc["err"] = int(bool(tc["err"] or failed))
+
+        elif kind == "compacted":
+            close_model()
+            ctx["compact_events"].append({"t0": ts, "t1": ts, "idx": idx, "pre": None,
+                                          "label": "compaction (encrypted summary)"})
+            if not sub:
+                _item(ctx, idx, ts, "compaction", None, 0)
+            if ts is not None:
+                last_input_ts = ts
+
+        if ts is not None:
+            last_any_ts = ts if last_any_ts is None else max(last_any_ts, ts)
+
+    if pending_model is not None:
+        unassigned_models.append(pending_model)
+    for call in ctx["models"]:
+        if call.pop("_fast_pending", False):
+            call["_unconfirmed_usage"] = call.get("usage")
+            call["usage"] = None
+            call["stop"] = call.pop("_fast_prior_stop", call.get("stop"))
+    ctx["open_tools"].extend(pending_tools.values())
+
+
 def _usage_numbers(call):
     u = call.get("usage") or {}
+    if call.get("fmt") == "codex":
+        total_in = int(u.get("input_tokens") or 0)
+        cr = min(total_in, int(u.get("cached_input_tokens") or 0))
+        cw = min(max(0, total_in - cr), int(u.get("cache_write_input_tokens") or 0))
+        inp = max(0, total_in - cr - cw)
+        out = int(u.get("output_tokens") or 0)
+        think = u.get("reasoning_output_tokens")
+        think_reported = isinstance(think, (int, float))
+        think = int(think) if think_reported else 0
+        return inp, cw, cr, out, max(0, min(out, think)), think_reported, 0
     if call.get("fmt") == "pi":
         inp = int(u.get("input") or 0)
         cw = int(u.get("cacheWrite") or 0)
@@ -946,6 +1623,10 @@ def _partition(intervals, t_start, t_end):
 def auto_window(models, override):
     if override:
         return int(override)
+    for call in reversed(models):
+        reported = call.get("context_window")
+        if isinstance(reported, (int, float)) and reported > 0:
+            return int(reported)
     mx = 0
     for c in models:
         mx = max(mx, c["_in"] + c["_cc"] + c["_cr"])
@@ -981,7 +1662,7 @@ def _label_for(group, sub):
     return GROUP_LABELS.get(group, group)
 
 
-def build_ledger(ctx, models, price, window, base):
+def build_ledger(ctx, models, price, window, base, request_prices=None):
     """Reconstruct the context window at every main-agent request and cost it out."""
     main = sorted([c for c in models if not c["sub"]], key=lambda c: c["idx"])
     items = sorted(ctx["items"], key=lambda it: it["i"])
@@ -1000,6 +1681,16 @@ def build_ledger(ctx, models, price, window, base):
     def is_rebuild(prev, cur):
         pm = measured(prev)
         return cur["_cr"] < 0.85 * pm and (cur["_in"] + cur["_cc"]) > max(2_000, 0.25 * pm)
+
+    def bounded_int_groups(groups, limit):
+        """Largest-remainder rounding that cannot exceed the measured integer window."""
+        values = [(key, value) for key, value in groups.items() if value >= 1]
+        rounded = {key: int(math.floor(value)) for key, value in values}
+        target = min(int(limit), int(round(sum(value for _, value in values))))
+        extra = max(0, target - sum(rounded.values()))
+        for key, _ in sorted(values, key=lambda kv: kv[1] - math.floor(kv[1]), reverse=True)[:extra]:
+            rounded[key] += 1
+        return rounded
 
     hint = 0.0
     snap_at = {}
@@ -1052,9 +1743,14 @@ def build_ledger(ctx, models, price, window, base):
     def tok(it):
         return it["img"] + it["ch"] / (cpt_tool if it["g"] in TOOLISH else cpt_prose)
 
-    read_mult = price[2] if price else 0.1
-    p_in = price[0] / 1e6 if price else 0.0
-    p_out = price[1] / 1e6 if price else 0.0
+    # Without a cited price there is no defensible economic cache weight; use raw tokens.
+    # Per-request rates keep category dollars reconciled when the model changes or an
+    # OpenAI request crosses the documented long-context threshold.
+    request_prices = request_prices or {}
+    priced_main = [request_prices.get(id(c), (price, 1.0))[0] for c in main]
+    read_multipliers = [p[2] for p in priced_main if p]
+    read_mult = read_multipliers[0] if read_multipliers \
+        and all(x == read_multipliers[0] for x in read_multipliers) else 1.0
 
 
     # ---- walk the requests
@@ -1127,10 +1823,14 @@ def build_ledger(ctx, models, price, window, base):
             new_share, old_share = (computed_budget / new_total if new_total > 0 else 0.0), 0.0
         old_share = min(1.0, old_share)
         # actual $ for this request's input, split by computed vs cached at the API's own prices
+        call_price, input_mult = request_prices.get(id(c), (price, 1.0))
+        call_p_in = call_price[0] * input_mult / 1e6 if call_price else 0.0
+        call_read_mult = call_price[2] if call_price else 1.0
         cc1h = c["_cc1h"]
         cc5m = max(0, c["_cc"] - cc1h)
-        write_cost = (c["_in"] * 1.0 + cc5m * (price[3] if price else 1.25) + cc1h * (price[4] if price else 2.0)) * p_in
-        read_cost = c["_cr"] * read_mult * p_in
+        write_cost = (c["_in"] + cc5m * (call_price[3] if call_price else 1.25)
+                      + cc1h * (call_price[4] if call_price else 2.0)) * call_p_in
+        read_cost = c["_cr"] * call_read_mult * call_p_in
         comp_rate = write_cost / computed_budget if computed_budget > 0 else 0.0
         cache_rate = read_cost / c["_cr"] if c["_cr"] > 0 else 0.0
         for key, sub_, t, is_new in parts:
@@ -1170,7 +1870,7 @@ def build_ledger(ctx, models, price, window, base):
                         cause = f"cache expired after {fmt_duration(gap)} idle (TTL {fmt_duration(ttl)})"
                     elif (c.get("model") or "") != (prev.get("model") or ""):
                         cause = f"model changed to {c.get('model')}"
-                extra = recomputed * (comp_rate - cache_rate) if price else None
+                extra = recomputed * (comp_rate - cache_rate) if call_price else None
                 events.append({"t": round(c["t0"] - base, 3), "recomputed": int(recomputed),
                                "expected": int(prev_meas), "cause": cause,
                                "extra_cost": extra, "k": k})
@@ -1182,7 +1882,7 @@ def build_ledger(ctx, models, price, window, base):
         hist_cost += old_tok * (cache_rate if cache_rate else comp_rate)
         series.append({"t": round(c["t0"] - base, 3), "m": int(meas), "in": c["_in"], "cc": c["_cc"],
                        "cr": c["_cr"], "old": int(round(old_tok)),
-                       "g": {key: int(round(v)) for key, v in comp.items() if v >= 1}})
+                       "g": bounded_int_groups(comp, meas)})
         last_detail = (c, comp, detail, present, snap, meas)
         prev, prev_snap = c, (snap or prev_snap)
 
@@ -1288,7 +1988,7 @@ def _tool_loading(ctx, main, cpt, read_mult, base):
     for rec in sorted(ctx["tool_records"], key=lambda r: r["idx"]):
         if rec["name"] not in seen:
             seen[rec["name"]] = rec
-    searches = [t for t in ctx["tools"] if t["n"] == "ToolSearch" and not t["sub"]]
+    searches = [t for t in ctx["tools"] if t["n"] in ("ToolSearch", "tool_search") and not t["sub"]]
     by_idx = {c["idx"]: k for k, c in enumerate(main)}
 
     def request_index_after(idx):
@@ -1310,7 +2010,8 @@ def _tool_loading(ctx, main, cpt, read_mult, base):
         solo = False
         if srch is not None:
             req = main[request_of(srch["idx"])]
-            solo = all(t == "ToolSearch" for t in req["tools"]) and req["stop"] == "tool_use"
+            solo = all(t in ("ToolSearch", "tool_search") for t in req["tools"]) \
+                and req["stop"] == "tool_use"
             if solo:  # the whole request existed only to fetch schemas: one extra round trip
                 k_req = request_of(srch["idx"])
                 nxt = main[k_req + 1] if k_req + 1 < len(main) else None
@@ -1331,7 +2032,8 @@ def _tool_loading(ctx, main, cpt, read_mult, base):
     unloaded_direct = n_unloaded * avg_schema * (1 + read_mult * (R - 1))
     unloaded_deferred = per_tool_listing * n_unloaded * (1 + read_mult * (R - 1))
     return {
-        "requests": R, "listing_tokens": int(round(listing_tokens)), "deferred_count": len(deferred_names),
+        "requests": R, "listing_tokens": int(round(listing_tokens)),
+        "catalog_known": bool(ctx["deferred_listing"]), "deferred_count": len(deferred_names),
         "loaded": loaded, "searches": len(searches), "avg_schema": int(round(avg_schema)),
         "unloaded_count": n_unloaded, "unloaded_direct_eff": int(round(unloaded_direct)),
         "unloaded_deferred_eff": int(round(unloaded_deferred)),
@@ -1346,23 +2048,39 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
             source="", now=None, poll_ms=2500, fmt=None, price=None):
     now = now or time.time()
     fmt = fmt or detect_format(main_entries, source)
-    scan = _scan_pi if fmt == "pi" else _scan_claude
+    scanners = {"claude": _scan_claude, "codex": _scan_codex, "pi": _scan_pi}
+    if fmt not in scanners:
+        raise SystemExit(f"unknown transcript format: {fmt}")
+    scan = scanners[fmt]
     ctx = _new_ctx()
     scan(main_entries, False, ctx, "main")
     for name, entries in sub_streams:
         scan(entries, True, ctx, name)
 
-    models = [c for c in ctx["models"] if c["t1"] is not None]
+    candidates = [c for c in ctx["models"] if c["t1"] is not None]
+    if fmt == "codex":
+        latest_rid = max(candidates, key=lambda c: c["idx"])["rid"] if candidates else None
+        models = [c for c in candidates if isinstance(c.get("usage"), dict)
+                  or (live and c.get("rid") == latest_rid)]
+    else:
+        models = candidates
     for c in models:
         if c["t0"] is None or c["t0"] > c["t1"]:
             c["t0"] = c["t1"]
         c["_in"], c["_cc"], c["_cr"], c["_out"], c["_think"], c["_think_rep"], c["_cc1h"] = _usage_numbers(c)
         tks = [b[0] for b in c["blocks"] if b[1] == "thinking" and b[0] is not None]
         c["_think_end"] = max(tks) if tks else None
+    # A live Codex response appears before its final token_count event. Keep that call in
+    # the activity/state timeline, but do not let its provisional zeroes replace the last
+    # measured context window or enter token, cost, and ledger accounting.
+    metered_models = [c for c in models if isinstance(c.get("usage"), dict)] \
+        if fmt == "codex" else models
     for c in models:
         if not c["sub"] and c["_think"] > 0:
             _item(ctx, c["idx"], c["t1"], "thinking", None, 0, c["_think"], {"transient": True})
-    tools = [t for t in ctx["tools"] if t["t0"] is not None]
+    model_rids = {c.get("rid") for c in models}
+    tools = [t for t in ctx["tools"] if t["t0"] is not None
+             and (fmt != "codex" or not t.get("_rid") or t.get("_rid") in model_rids)]
     prompts = sorted((p for p in ctx["prompts"] if p["t0"] is not None), key=lambda p: p["t0"])
     interrupts = [x for x in ctx["interrupts"] if x["t0"] is not None]
     errors = [x for x in ctx["errors"] if x["t0"] is not None]
@@ -1370,14 +2088,17 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
     stamps = [c["t0"] for c in models] + [c["t1"] for c in models] + [p["t0"] for p in prompts] + \
              [t["t0"] for t in tools] + [t["t1"] for t in tools if t["t1"] is not None] + \
              [x["t0"] for x in interrupts + errors]
-    for e in main_entries:
-        if isinstance(e, dict):
-            ts = parse_ts(e.get("timestamp"))
-            if ts is not None:
-                stamps.append(ts)
-                break
+    if ctx.get("active_start_ts") is not None:
+        stamps.append(ctx["active_start_ts"])
+    else:
+        for e in main_entries:
+            if isinstance(e, dict):
+                ts = parse_ts(e.get("timestamp"))
+                if ts is not None:
+                    stamps.append(ts)
+                    break
     if not stamps:
-        raise SystemExit("no timestamped entries found; is this a Claude Code or pi transcript?")
+        raise SystemExit("no timestamped entries found; is this a Claude Code, Codex CLI or pi transcript?")
     t_start = min(stamps)
     t_end = max(stamps)
     if live:
@@ -1452,49 +2173,88 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
         laps.append({"n": i + 1, "t0": p["t0"], "t1": max(t1, p["t0"]), "calls": n_calls, "tools": n_tools, "l": p["l"]})
     lap_of = lambda t: next((lp["n"] for lp in reversed(laps) if lp["t0"] <= t), None)
 
-    tok_computed = sum(c["_in"] + c["_cc"] for c in models)
-    tok_cache_write = sum(c["_cc"] for c in models)
-    tok_cached = sum(c["_cr"] for c in models)
-    tok_out = sum(c["_out"] for c in models)
-    tok_think = sum(c["_think"] for c in models)
-    think_rep = [c["_think_rep"] for c in models]
-    tok_tool_est = int(round(ctx["tool_chars"] / 4.0))
+    tok_computed = sum(c["_in"] + c["_cc"] for c in metered_models)
+    tok_cache_write = sum(c["_cc"] for c in metered_models)
+    tok_cached = sum(c["_cr"] for c in metered_models)
+    tok_out = sum(c["_out"] for c in metered_models)
+    tok_think = sum(c["_think"] for c in metered_models)
+    think_rep = [c["_think_rep"] for c in metered_models]
+    tok_tool_est = int(round((sum(t.get("ch") or 0 for t in tools)
+                              if fmt == "codex" else ctx["tool_chars"]) / 4.0))
 
     decode_time = totals["reasoning"] + totals["generation"]
     prefill_time = totals["prefill"]
-    main_models = [c for c in models if not c["sub"]]
+    main_models = [c for c in metered_models if not c["sub"]]
     last = max(main_models, key=lambda c: c["t1"]) if main_models else None
-    window = auto_window(models, context_window)
+    window = auto_window(metered_models or models, context_window)
     ctx_used = (last["_in"] + last["_cc"] + last["_cr"]) if last else 0
     model_names = sorted({c["model"] for c in models if c.get("model")})
     wall = max(0.0, t_end - t_start)
 
     # ---- cost
     primary_model = None
-    if models:
+    if metered_models:
         counts = defaultdict(int)
-        for c in models:
+        for c in metered_models:
             counts[c.get("model") or ""] += c["_in"] + c["_cc"] + c["_cr"] + c["_out"]
         primary_model = max(counts, key=counts.get)
     pricing = pricing_for(primary_model, price)
+    per_call_pricing = [pricing_for(c.get("model"), price) for c in metered_models]
+    if pricing and any(p is None for p in per_call_pricing):
+        pricing = None
     cost = None
+    ledger_request_prices = {}
     if pricing:
         p_in, p_out, rd, w5, w1 = pricing[:5]
+        pricing_rows = []
+        seen_prices = set()
+        for pr_ in per_call_pricing:
+            key = (pr_[7],) + tuple(pr_[:7])
+            if key in seen_prices:
+                continue
+            seen_prices.add(key)
+            pricing_rows.append({"model": pr_[7], "in": pr_[0], "out": pr_[1],
+                                 "read_mult": pr_[2], "write_5m_mult": pr_[3],
+                                 "write_1h_mult": pr_[4], "source": pr_[5],
+                                 "source_url": pr_[6]})
         c_in = c_out = c_read = c_write = 0.0
-        for c in models:
-            pr_ = pricing_for(c.get("model"), price) or pricing
+        long_context_requests = 0
+        for c, pr_ in zip(metered_models, per_call_pricing):
             pi_, po_, rd_, w5_, w1_ = pr_[:5]
+            long_context = pr_[7] in OPENAI_LONG_CONTEXT_MODELS \
+                and c["_in"] + c["_cc"] + c["_cr"] > OPENAI_LONG_CONTEXT_THRESHOLD
+            in_mult = 2.0 if long_context else 1.0
+            out_mult = 1.5 if long_context else 1.0
+            ledger_request_prices[id(c)] = (pr_, in_mult)
+            long_context_requests += int(long_context)
             cc1h = c["_cc1h"]
             cc5m = max(0, c["_cc"] - cc1h)
-            c_in += c["_in"] * pi_ / 1e6
-            c_write += (cc5m * w5_ + cc1h * w1_) * pi_ / 1e6
-            c_read += c["_cr"] * rd_ * pi_ / 1e6
-            c_out += c["_out"] * po_ / 1e6
+            c_in += c["_in"] * pi_ * in_mult / 1e6
+            c_write += (cc5m * w5_ + cc1h * w1_) * pi_ * in_mult / 1e6
+            c_read += c["_cr"] * rd_ * pi_ * in_mult / 1e6
+            c_out += c["_out"] * po_ * out_mult / 1e6
         cost = {"total": c_in + c_out + c_read + c_write, "input": c_in, "output": c_out,
                 "cache_read": c_read, "cache_write": c_write,
                 "pricing": {"model": primary_model, "in": p_in, "out": p_out, "read_mult": rd,
-                            "write_5m_mult": w5, "write_1h_mult": w1, "source": pricing[5]}}
+                            "write_5m_mult": w5, "write_1h_mult": w1, "source": pricing[5],
+                            "source_url": pricing[6], "rows": pricing_rows,
+                            "long_context_requests": long_context_requests}}
     reported = ctx["reported_cost"] if fmt == "pi" and ctx["reported_cost"] else None
+    if cost and pricing[5] == "--price":
+        pricing_note = "Dollar cost uses the explicit --price override; it is an estimate, not an invoice."
+    elif cost:
+        source_note = pricing[5] if len(cost["pricing"]["rows"]) == 1 else \
+            f"{len(cost['pricing']['rows'])} cited per-model price rows"
+        pricing_note = (f"Dollar cost is an estimated Standard API list-price equivalent using {source_note}; "
+                        "it is not an invoice.")
+        if cost["pricing"]["long_context_requests"]:
+            pricing_note += (f" The documented >{OPENAI_LONG_CONTEXT_THRESHOLD // 1000}K input surcharge was "
+                             f"applied to {cost['pricing']['long_context_requests']} request(s).")
+    elif fmt == "codex" and not metered_models:
+        pricing_note = "No confirmed token usage yet; dollar cost omitted."
+    else:
+        names = ", ".join(model_names) or "this model"
+        pricing_note = f"No cited public API price is configured for {names}; dollar cost omitted."
 
     stats = {
         "tg_s": (tok_out / decode_time) if decode_time > 0 else None,
@@ -1549,7 +2309,8 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
 
     ledger = None
     try:
-        ledger = build_ledger(ctx, models, pricing, window, base)
+        ledger = build_ledger(ctx, metered_models, pricing, window, base,
+                              request_prices=ledger_request_prices)
     except Exception as exc:  # the ledger is an add-on: never take the panel down with it
         ledger = {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -1558,12 +2319,15 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
         "title": title or default_title,
         "source": source,
         "fmt": fmt,
-        "agent": "pi" if fmt == "pi" else "claude-code",
+        "agent": ctx["meta"].get("agent") or ADAPTER_META[fmt]["agent"],
+        "agent_label": ctx["meta"].get("agent_label") or ADAPTER_META[fmt]["agent_label"],
+        "cli_label": ctx["meta"].get("cli_label") or ADAPTER_META[fmt]["cli_label"],
         "session_id": ctx["meta"].get("session_id"),
         "cwd": ctx["meta"].get("cwd"),
         "git_branch": ctx["meta"].get("git_branch"),
         "cli_version": ctx["meta"].get("cli_version"),
         "models": model_names,
+        "pricing_note": pricing_note,
         "generated_at": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(timespec="seconds"),
         "live": bool(live),
         "poll_ms": int(poll_ms),
@@ -1605,7 +2369,7 @@ def derive_state(payload, mtime, now=None):
     last_lap = laps[-1] if laps else None
     if last_lap and (not last_model or last_model["t0"] < last_lap["t0"]):
         return "working" if age < 600 else "idle"
-    if last_model and last_model.get("stop") in ("end_turn", "stop", None):
+    if last_model and last_model.get("stop") in ("end_turn", "stop"):
         return "done" if age < 1800 else "idle"
     if age < 120:
         return "working"
@@ -1713,6 +2477,7 @@ def fleet_payload(limit=30, price=None, context_window=None, now=None, cache=Non
         state = derive_state(p, s["mtime"], now)
         rows.append({
             "path": key, "fmt": s["fmt"], "session_id": p["meta"].get("session_id") or s["session_id"],
+            "agent": p["meta"].get("agent"), "agent_label": p["meta"].get("agent_label"),
             "title": p["meta"]["title"], "cwd": p["meta"].get("cwd"), "branch": p["meta"].get("git_branch"),
             "models": p["meta"].get("models"), "state": state, "herdr": h,
             "last_activity": s["mtime"], "age_s": now - s["mtime"], "wall_s": st["time"]["wall"],
@@ -1726,7 +2491,11 @@ def fleet_payload(limit=30, price=None, context_window=None, now=None, cache=Non
     rows.sort(key=lambda r: (STATE_ORDER.get(r["herdr"]["status"] if r["herdr"] else r["state"], 9), -r["last_activity"]))
     return {"generated_at": dt.datetime.fromtimestamp(now, dt.timezone.utc).isoformat(timespec="seconds"),
             "now": now, "rows": rows, "herdr_servers": herdr["servers"], "tokenograph": __version__,
-            "sources": {"claude": str(projects_dir()), "pi": str(pi_sessions_dir())}}
+            "sources": [
+                {"fmt": "claude", "label": ADAPTER_META["claude"]["agent_label"], "path": str(projects_dir())},
+                {"fmt": "codex", "label": ADAPTER_META["codex"]["agent_label"], "path": str(codex_sessions_dir())},
+                {"fmt": "pi", "label": ADAPTER_META["pi"]["agent_label"], "path": str(pi_sessions_dir())},
+            ]}
 
 
 # --------------------------------------------------------------------------- rendering
@@ -1758,7 +2527,7 @@ def load_streams(session_path: Path, include_subagents: bool):
     reader = TranscriptReader(session_path)
     reader.refresh()
     subs = []
-    if include_subagents:
+    if include_subagents and detect_format(reader.entries, session_path) == "claude":
         for f in subagent_files(session_path):
             r = TranscriptReader(f)
             r.refresh()
@@ -1779,7 +2548,7 @@ def build_payload(reader, subs, args, live=False, now=None):
 def cmd_list(args):
     sessions = iter_sessions()
     if not sessions:
-        print(f"no sessions under {projects_dir()} or {pi_sessions_dir()}")
+        print(f"no sessions under {projects_dir()}, {codex_sessions_dir()} or {pi_sessions_dir()}")
         return 1
     print(f"{len(sessions)} session(s), newest first\n")
     for s in sessions[: args.n]:
@@ -2121,14 +2890,14 @@ def main(argv=None):
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("session", help="transcript path, session id prefix, directory, or 'latest'")
-    common.add_argument("--title", help="panel title (default: the first prompt, or pi's session name)")
+    common.add_argument("--title", help="panel title (default: the first prompt, or the adapter's session name)")
     common.add_argument("--context-window", type=int, default=None,
                         help="context window in tokens for the fill ring (default: auto, 200k or 1M)")
     common.add_argument("--no-subagents", action="store_true", help="ignore subagent transcripts")
-    common.add_argument("--format", choices=["auto", "claude", "pi"], default="auto")
+    common.add_argument("--format", choices=["auto", "claude", "codex", "pi"], default="auto")
     common.add_argument("--price", help="IN,OUT[,READ_MULT,WRITE5M_MULT,WRITE1H_MULT] in $/M tokens; default: built-in table")
 
-    p = sub.add_parser("list", help="list Claude Code and pi sessions, newest first")
+    p = sub.add_parser("list", help="list Claude Code, Codex CLI and pi sessions, newest first")
     p.add_argument("-n", type=int, default=20, help="how many to show")
     p.set_defaults(fn=cmd_list)
 

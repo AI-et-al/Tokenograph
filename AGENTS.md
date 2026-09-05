@@ -6,9 +6,9 @@ The long form with evidence is in `docs/field-notes.md`.
 
 ## What this is
 
-Tokenometrics for coding-agent sessions. It reads Claude Code transcripts and pi session
-files and renders one page: throughput, an additive wall-clock split, token and cost
-accounting, a per-call activity timeline, a ledger of what is in the context window and
+Tokenometrics for coding-agent sessions. It reads Claude Code transcripts, Codex CLI
+rollouts and pi session files and renders one page: throughput, an additive wall-clock
+split, token and cost accounting, a per-call activity timeline, a ledger of what is in the context window and
 what each part has cost, cache rebuilds with causes, a deferred-vs-direct tool-loading
 comparison, a re-sent-history measure, a property-graph export, and a fleet view with
 herdr's agent states. Python standard library only. No build step.
@@ -30,7 +30,7 @@ tokenograph/__init__.py   everything: adapters, phases, ledger, graph, fleet, CL
 tokenograph/panel.html    session page; __TOKENOGRAPH_DATA__ is replaced with the JSON payload
 tokenograph/fleet.html    fleet page
 examples/make_sample.py   synthetic transcript generator with ground-truth timings (the test oracle)
-tests/                    unittest; hand-built transcripts for both formats, a fake herdr socket
+tests/                    unittest; hand-built transcripts for all formats, a fake herdr socket
 docs/field-notes.md       evidence, method, paper notes, the numbers behind the claims
 ```
 
@@ -83,6 +83,27 @@ pi sessions, `~/.pi/agent/sessions/<cwd>/<stamp>_<id>.jsonl`:
 - No system prompt and no per-block timing, so prefill is a latency fit and the system
   prompt shows up under "tool schemas & unmeasured". `usage.cost.total` is pi's own cost
   and matches this tool's estimate to the cent on pi's fixtures.
+
+Codex CLI rollouts, `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`:
+
+- The first line is `session_meta`; use `payload.id` as the session id (not a later
+  `session_id` field). `turn_context` carries the model. Multiple `session_meta` records
+  can appear after resume/fork replay.
+- Timestamped `response_item` records carry assistant output and function/custom tool
+  calls. Pair tools globally by `call_id`; web-search events do not have a reliable
+  cross-version id, so do not invent an interval. A `response_item` `agent_message` is
+  inter-agent input, while an `event_msg` `agent_message` can be assistant-output fallback.
+- `token_count.info.last_token_usage` is per request and `total_token_usage` is cumulative.
+  Only changed cumulative totals make a call. Normalize uncached input as
+  `max(0, input - cached_input - cache_write_input)`; reasoning is a subset of output.
+  `model_context_window` is the numeric window. Newer CLIs may emit an earlier
+  provisional `token_usage_record`; commit it only when the delayed `token_count` matches.
+  Standalone records before `compacted` and at a live tail are not session totals.
+- Reasoning and compaction content is encrypted. Use reported `reasoning_output_tokens`
+  and a zero-sized `compacted` marker; never estimate plaintext reasoning from ciphertext.
+- Prefer `event_msg.user_message` for the lap label, with neighboring
+  `response_item` user content as the ledger-sized fallback. In legacy resumed rollouts,
+  ignore replayed history before the latest `task_started` marker.
 
 herdr: newline-delimited JSON over `~/.config/herdr/herdr.sock` (or `$HERDR_SOCKET_PATH`);
 `{"id":..,"method":"agent.list","params":{}}` returns each pane's agent, status
