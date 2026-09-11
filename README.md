@@ -12,6 +12,11 @@ It started as a clean-room equivalent of the run-stats panel Han Xiao posted for
 16-hour autonomous coding run ([the post](https://x.com/hxiao/status/2095609195030864347)).
 Python standard library only, no build step.
 
+**Development beta snapshot — 2026-09-11.** The session panel, live terminal telemetry,
+tool details, and opt-in Starship summary are ready for continued use in our own sessions.
+This is a source checkpoint, not a package release. The image above remains a synthetic
+example; a more representative walkthrough will follow experience with another session.
+
 ```
 python3 -m tokenograph list                          # Claude Code, Codex CLI and pi, newest first
 python3 -m tokenograph build latest -o panel.html    # self-contained HTML, open it anywhere
@@ -64,6 +69,20 @@ The page polls the file; the spinner beside the context ring means live. Leave i
 for the whole run: the rebuild list and the re-sent-history line are most useful at the
 moment they change.
 
+**A summary in your Starship prompt.** The optional
+[Starship integration](integrations/starship/README.md) adds a Moonfly-accented line with
+model, context, session tokens, cache use, cost, and named tool activity. Enable it with
+`tg-on SESSION_ID_OR_PATH` after installing the helper; `tg-off` stops it. Each shell is
+opt-in and pinned to its selected session. The prompt reads a small local cache on
+redraw, with no model calls or transcript parsing in the prompt command.
+
+**Continuous terminal telemetry.** `python3 -m tokenograph.live SESSION --once` emits a
+snapshot for other frontends; omit `--once` to stream changes. The optional
+[Vesper terminal viewer](integrations/vesper-viewer/README.md) combines public task
+activity with a continuously updating Moonfly strip. It requires an existing compatible
+companion and Node.js; it is read-only and does not provide the native Codex input UI.
+Starship's summary redraws with the shell prompt; the separate viewer animates continuously.
+
 **Report on a finished session.**
 
 ```
@@ -71,6 +90,10 @@ tokenograph build latest -o panel.html                       # self-contained, o
 tokenograph build latest --title "16h port to the new runtime" -o port.html
 tokenograph build ~/.claude/projects/-home-me-app/1234abcd.jsonl -o app.html
 ```
+
+**Before sharing a report:** HTML, JSON, and graph exports can contain prompt/tool labels,
+commands, paths, and other identifying metadata. They are not scrubbed. Keep reports
+private or use the synthetic demo; the proposed sharing-safe export is not implemented yet.
 
 **Every session on the machine, with herdr's states.**
 
@@ -182,6 +205,11 @@ The OpenAI rows were checked on 2026-09-04 against the official model pages for
 [gpt-5.3-codex](https://developers.openai.com/api/docs/models/gpt-5.3-codex), and
 [gpt-5.2-codex](https://developers.openai.com/api/docs/models/gpt-5.2-codex); cache
 multipliers follow the official [prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching).
+The [gpt-6-astra](https://developers.openai.com/api/docs/models/gpt-6-astra) row was
+checked separately on 2026-09-11: $10 input, $1 cached input, $12.50 cache writes,
+and $50 output per million tokens. Requests above 272,000 input tokens apply 2x
+input/cache rates and 1.5x output rates to the whole request. Each model retains
+its own source date; adding Astra does not mark older rows as freshly checked.
 These are Standard API list-price equivalents, not Codex subscription invoices. A model
 without an exact cited row remains unpriced and the panel footer says so; `--price` is the
 only opt-in override.
@@ -191,6 +219,15 @@ numbered in order, the three assistant phases, one row per tool name, compaction
 interrupts and errors, idle stretches. Hover any bar for the call behind it; drag to zoom,
 double-click to reset. In `serve` mode the page follows the transcript and the spinner
 next to the ring shows it is live.
+
+For Codex rollouts that record structured tool completions, **Tool details** identifies
+the tools inside orchestration batches: commands, named MCP tools, web actions, and file
+edits. Expand a tool for completion times, reported durations, outcomes, and bounded
+command/argument previews. Earlier calls can be revealed in batches of 20. Expansion
+choices survive live refreshes. The additional timeline rows use completion ticks;
+they do not infer unreported start times. These detail records do not add duplicate
+tokens, dollars, calls, or wall time to the existing accounting. Context-ledger dollars
+remain attributed to the transcript's outer calls when finer attribution is unavailable.
 
 **Context.** The window reconstructed at every request, as a stacked chart with the
 API's measured input total drawn over it, and three tables:
@@ -219,6 +256,11 @@ API's measured input total drawn over it, and three tables:
   the last non-assistant entry before its first block and ends at its last block. Codex
   groups timestamped output items structurally and attaches the next changed per-request
   usage record; the usage event itself is deliberately not used as the response end.
+  Timestamped Codex output and paired tools remain visible even without confirmed usage
+  (for example after an interruption), in static and live views. Only confirmed usage
+  enters token/cost totals and the measured context ledger; totals may therefore be partial.
+  The footer discloses incomplete usage and throughput is withheld rather than dividing
+  partial token counts by the duration of all observed activity.
   pi writes one entry per message; the message carries the request's start time and the
   entry its end.
 - **Tool calls.** A `tool_use` block is paired with the `tool_result` carrying its id.
@@ -338,14 +380,19 @@ The short list; numbers and evidence in `docs/field-notes.md`, the agent brief i
 
 ## Roadmap
 
-In order of how much each changes what the tool can tell you: exact token counts through
-the API's counting endpoint; adapters with real server timings for local models and for
-OpenCode and Gemini CLI; an `advise` command that turns the ledger into the three
-actions with the highest expected saving; Claude Code and herdr hooks that surface cost
-and rebuilds where you are looking; fleet economics over time; experiments on the graph
-export such as simulating a forgetting policy against your own sessions; scrubbed,
-shareable sessions and a `--redact` flag for built panels. Details in
-`docs/field-notes.md`, section 6.
+The [working roadmap](docs/roadmap.md) is a big-picture lens, not a launch schedule.
+The near-term goal is usefulness in our own sessions. If wider sharing becomes a goal,
+the optional path is:
+
+1. License/attribution, CI and installation checks, explicit missing-data coverage, and
+   sharing-safe exports across all formats.
+2. A small public beta with a synthetic demo and evidence of repeat use.
+3. Explainable, offline advice and outcome-aware before/after comparisons.
+4. Faster fleet analysis or additional adapters when beta users demonstrate a need.
+
+These are proposed milestones, not shipped features. The longer-term research ideas,
+including exact token calibration and measured server timings, remain in
+[`docs/field-notes.md`](docs/field-notes.md), section 6.
 
 ## Data model
 
@@ -356,7 +403,7 @@ meta    title, agent (claude-code | codex | pi), adapter labels, session id, mod
 base    session start (epoch seconds); all times below are relative to it
 stats   tg_s, pp_s, laps, avg_lap_s, time{...}, tokens{...}, context{...}, counts{...},
         cost{total,input,output,cache_read,cache_write,pricing} or null, cost_reported (pi)
-calls   k=m model call {t0,t1,p:[prefill_end,reasoning_end],tok:[computed,cached,out,thinking],lap,stop,tools}
+calls   k=m model call {t0,t1,p:[prefill_end,reasoning_end],tok:[computed,cached,out,thinking],lap,stop,tools,ledger_k}
         k=t tool call  {t0,t1,n:name,l:label,ch:result chars,err,open}
         k=c compaction, k=x interrupt, k=b user shell command (pi), k=e API error
 laps    {n,t0,t1,calls,tools,l:prompt}
@@ -365,6 +412,11 @@ idle    [t0,t1,'w'|'o'] waiting-for-user or overhead
 ledger  cpt, cpt_prose, tool_block_hint, series[{t,m,in,cc,cr,g{category:tokens}}],
         now{rows[...]}, cum{rows[...],computed,cached,requests}, events[...], tools{...}
 ```
+
+`stats.counts.assistant_unmetered` counts observed Codex calls without confirmed usage;
+their zero-valued `tok` entries are placeholders, not measured zero usage. `ledger_k` is
+the zero-based ledger request index, or null for unmetered/subagent activity; graph
+exports use it to keep category and rebuild links aligned with confirmed requests.
 
 `tokenograph fleet` (static) or `/fleet.json` (served) emits one row per session with the
 same stats plus `state`, `herdr` (status, pane, workspace, name) and `age_s`.

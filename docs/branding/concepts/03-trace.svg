@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Tokenograph — Trace</title>
+  <desc id="desc">A stepped activity trace moving from an input point to a measured token.</desc>
+  <path d="M9 45h11V27h12v10h12V16h11" stroke="#7ee3b8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="9" cy="45" r="4.5" fill="#2f8ff5"/>
+  <rect x="51" y="12" width="8" height="8" rx="1.5" fill="#2f8ff5"/>
+</svg>

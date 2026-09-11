@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Tokenograph — Context Loop</title>
+  <desc id="desc">An open context ring around three measured token rows, with a token at the opening.</desc>
+  <path d="M32 9a23 23 0 1 0 23 23" stroke="#2f8ff5" stroke-width="6" stroke-linecap="round"/>
+  <rect x="44" y="12" width="8" height="8" rx="1.5" transform="rotate(45 48 16)" fill="#7ee3b8"/>
+  <path d="M23 24h14M23 32h20M23 40h11" stroke="#7ee3b8" stroke-width="4.5" stroke-linecap="round"/>
+</svg>

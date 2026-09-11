@@ -62,6 +62,7 @@ INTERRUPT_PREFIX = "[Request interrupted by user"
 DEFAULT_CPT = 3.8          # characters per token when the session cannot be calibrated
 PRICING_DATE = "2026-06"   # existing Anthropic table snapshot; override with --price
 OPENAI_PRICING_DATE = "2026-09-04"
+OPENAI_PRICE_DATES = {"gpt-6-astra": "2026-09-11"}
 
 # $/M input, $/M output, cache-read multiplier, cache-write 5m multiplier, cache-write 1h multiplier
 PRICING = {
@@ -82,9 +83,11 @@ PRICING = {
     "claude-3-7-sonnet": (3.0, 15.0, 0.1, 1.25, 2.0),
     "claude-haiku-4-5": (1.0, 5.0, 0.1, 1.25, 2.0),
     "claude-3-5-haiku": (0.8, 4.0, 0.1, 1.25, 2.0),
-    # Standard API list prices retrieved on OPENAI_PRICING_DATE. These are estimates for
+    # Standard API list prices retrieved on each model's OPENAI_PRICE_DATES entry,
+    # falling back to OPENAI_PRICING_DATE. These are estimates for
     # Codex rollouts, not evidence of the user's subscription invoice. Each row's public
     # source is carried into the panel through OPENAI_PRICE_URLS.
+    "gpt-6-astra": (10.0, 50.0, 0.1, 1.25, 1.25),
     "gpt-5.6-sol": (4.0, 20.0, 0.1, 1.25, 1.25),
     "gpt-5.6-terra": (2.0, 12.0, 0.1, 1.25, 1.25),
     "gpt-5.5": (5.0, 30.0, 0.1, 1.0, 1.0),
@@ -96,11 +99,11 @@ PRICING = {
 
 OPENAI_PRICE_URLS = {
     name: f"https://developers.openai.com/api/docs/models/{name}" for name in (
-        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
+        "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini",
         "gpt-5.3-codex", "gpt-5.2-codex",
     )
 }
-OPENAI_LONG_CONTEXT_MODELS = {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4"}
+OPENAI_LONG_CONTEXT_MODELS = {"gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4"}
 OPENAI_LONG_CONTEXT_THRESHOLD = 272_000
 UNPRICED_MODELS = {"gpt-5.3-codex-spark", "codex-auto-review"}
 
@@ -303,7 +306,8 @@ def pricing_for(model, override=None):
     # product, so only the exact identifier on the cited public model page is priced.
     if model_id in OPENAI_PRICE_URLS:
         row = PRICING[model_id]
-        return row + (f"OpenAI model page · retrieved {OPENAI_PRICING_DATE}",
+        date = OPENAI_PRICE_DATES.get(model_id, OPENAI_PRICING_DATE)
+        return row + (f"OpenAI model page · retrieved {date}",
                       OPENAI_PRICE_URLS[model_id], model_id)
     if model_id.startswith("gpt-") or model_id.startswith("codex-") \
             or any(model_id == name or model_id.startswith(name + "-") for name in UNPRICED_MODELS):
@@ -564,7 +568,7 @@ def _new_ctx():
             "compact_boundaries": [], "compact_summaries": [], "compact_events": [], "meta": {},
             "open_tools": [], "tool_chars": 0, "items": [], "snapshots": [], "tool_records": [],
             "deferred_listing": [], "model_changes": [], "reported_cost": 0.0, "n_entries": 0,
-            "active_start_ts": None}
+            "active_start_ts": None, "tool_details": []}
 
 
 def _item(ctx, idx, ts, group, sub, chars=0, img=0, extra=None):
@@ -610,7 +614,9 @@ def _scan_claude(entries, sub: bool, ctx: dict, stream: str = "main"):
             continue
         kind = e.get("type")
         ts = parse_ts(e.get("timestamp"))
-        if not sub and len(meta) < 5:
+        # Metadata can arrive over several entries; adapter labels are not a signal
+        # that session identity, project and CLI fields have all been collected.
+        if not sub:
             for key, src in (("session_id", "sessionId"), ("cwd", "cwd"), ("git_branch", "gitBranch"),
                              ("cli_version", "version")):
                 if key not in meta and e.get(src):
@@ -964,11 +970,83 @@ def _codex_chars(value):
     return len(json.dumps(value, ensure_ascii=False))
 
 
+def _codex_tool_detail(item, ts):
+    """A recorded tool completion, not another billable call or timing interval."""
+    if not isinstance(item, dict) or not item.get("id") or ts is None:
+        return None
+    kind, output = item.get("type"), None
+    if kind == "CommandExecution":
+        name = "exec_command"
+        command = item.get("command") or []
+        detail = command[-1] if isinstance(command, list) and command else command
+        label = str(detail or "").splitlines()[0] if detail else ""
+        output = item.get("aggregated_output")
+        if output is None and ("stdout" in item or "stderr" in item):
+            output = str(item.get("stdout") or "") + str(item.get("stderr") or "")
+    elif kind == "McpToolCall":
+        name = ".".join(str(item.get(k) or "") for k in ("server", "tool")).strip(".")
+        args = item.get("arguments")
+        label = _codex_label(args)
+        if not label and isinstance(args, dict):
+            label = str(args.get("title") or args.get("description") or "")
+        detail = json.dumps(args, ensure_ascii=False, indent=2) if args is not None else ""
+        output = item.get("result")
+    elif kind == "FileChange":
+        name = "apply_patch"
+        changes = item.get("changes") or {}
+        paths = list(changes) if isinstance(changes, dict) else [
+            str(c.get("path", "")) for c in changes if isinstance(c, dict)]
+        label, detail = ", ".join(paths), "\n".join(paths)
+    elif kind == "Extension" and str(item.get("kind", "")).startswith("web."):
+        name = str(item["kind"])
+        args = item.get("query") or item.get("action")
+        label = _codex_label(args)
+        detail = json.dumps(args, ensure_ascii=False, indent=2) if not isinstance(args, str) else args
+    else:
+        return None
+    duration = item.get("duration")
+    seconds = None
+    if isinstance(duration, dict):
+        secs, nanos = duration.get("secs", 0), duration.get("nanos", 0)
+        if isinstance(secs, (int, float)) and isinstance(nanos, (int, float)):
+            seconds = max(0, secs + nanos / 1e9)
+    result = item.get("result") if isinstance(item.get("result"), dict) else {}
+    failed = bool(item.get("error") or result.get("isError") or
+                  item.get("status") in ("failed", "error") or item.get("exit_code") not in (None, 0))
+    detail = str(detail or "")
+    return {"id": str(item["id"]), "name": name, "label": str(label or "")[:240],
+            "detail": detail[:2000], "truncated": len(detail) > 2000,
+            "completed_at": ts, "duration_s": seconds,
+            "status": "failed" if failed else item.get("status", "observed"),
+            "exit_code": item.get("exit_code"),
+            "output_chars": _codex_chars(output) if output is not None else None,
+            "source": "completed item"}
+
+
+def observed_tools(entries, limit=12):
+    """Latest recorded completions, without guessing execution from script text."""
+    result, seen = [], set()
+    for entry in reversed(entries):
+        if not isinstance(entry, dict):
+            continue
+        payload = entry.get("payload") or {}
+        if entry.get("type") != "event_msg" or payload.get("type") != "item_completed":
+            continue
+        detail = _codex_tool_detail(payload.get("item"), parse_ts(entry.get("timestamp")))
+        if detail and detail["id"] not in seen:
+            seen.add(detail["id"])
+            result.append(detail)
+            if limit is not None and len(result) >= limit:
+                break
+    return result
+
+
 def _scan_codex(entries, sub: bool, ctx: dict, stream: str = "main"):
     """One pass over a Codex CLI rollout, across the legacy and current envelopes.
 
     `response_item` timestamps delimit model output and tools. Per-request usage comes
-    from changed `token_count` totals (or the 0.153+ `token_usage_record` fast path).
+    from changed `token_count` totals; early `token_usage_record` values remain
+    provisional until a changed counter confirms or corrects them.
     Reasoning bytes are encrypted: only their timestamp and reported token count are used.
     """
     meta = ctx["meta"]
@@ -982,6 +1060,7 @@ def _scan_codex(entries, sub: bool, ctx: dict, stream: str = "main"):
     unassigned_models = []
     pending_tools = {}
     tools_by_id = {}
+    detail_ids = set()
     prompt_seen = {}
     last_prompt = None
     seen_turn = False
@@ -992,7 +1071,6 @@ def _scan_codex(entries, sub: bool, ctx: dict, stream: str = "main"):
     last_total_sig = None
     event_agent = None
     event_reasoning_ts = None
-    last_fast_sig = None
     fast_model = None
     first_meta_payload = next((e.get("payload") for e in entries if isinstance(e, dict)
                                and e.get("type") == "session_meta" and isinstance(e.get("payload"), dict)), {})
@@ -1360,7 +1438,6 @@ def _scan_codex(entries, sub: bool, ctx: dict, stream: str = "main"):
             usage = payload.get("usage")
             if idx >= activity_start and isinstance(usage, dict) and int(usage.get("output_tokens") or 0) > 0:
                 target = finish_model(usage, usage_idx=idx, provisional=True)
-                last_fast_sig = usage_sig(usage) if target is not None else None
                 fast_model = target
 
         elif kind == "event_msg":
@@ -1378,14 +1455,25 @@ def _scan_codex(entries, sub: bool, ctx: dict, stream: str = "main"):
                 if total_sig is not None:
                     last_total_sig = total_sig
                 window = info.get("model_context_window")
-                fast_match = isinstance(usage, dict) and last_fast_sig is not None \
-                    and usage_sig(usage) == last_fast_sig
-                if idx >= activity_start and fast_match:
+                fast_same_request = fast_model is not None and not any(
+                    entry.get("type") in ("turn_context", "compacted")
+                    or (entry.get("type") == "event_msg" and
+                        (entry.get("payload") or {}).get("type") in
+                        ("user_message", "task_started", "turn_aborted"))
+                    or (entry.get("type") == "response_item" and
+                        (entry.get("payload") or {}).get("role") in ("user", "developer"))
+                    for entry in entries[fast_model["idx"] + 1:idx]
+                    if isinstance(entry, dict))
+                if idx >= activity_start and changed and isinstance(usage, dict) \
+                        and int(usage.get("output_tokens") or 0) > 0 and fast_same_request:
                     merge_fast_tail(window)
                     if fast_model is not None:
+                        # The delayed counter is authoritative, including corrections
+                        # to an earlier provisional value for this same request.
+                        fast_model["usage"] = usage
                         fast_model["_fast_pending"] = False
                         fast_model.pop("_fast_prior_stop", None)
-                    last_fast_sig = None
+                    last_usage_idx = max(last_usage_idx, idx)
                     fast_model = None
                 elif idx >= activity_start and changed and isinstance(usage, dict) and int(usage.get("output_tokens") or 0) > 0:
                     before = last_model
@@ -1403,6 +1491,10 @@ def _scan_codex(entries, sub: bool, ctx: dict, stream: str = "main"):
                 event_reasoning_ts = ts
             elif etype == "item_completed":
                 mark_item_failure(payload)
+                detail = _codex_tool_detail(payload.get("item"), ts) if idx >= activity_start else None
+                if detail and detail["id"] not in detail_ids:
+                    detail_ids.add(detail["id"])
+                    ctx["tool_details"].append({**detail, "sub": int(sub), "stream": stream})
             elif etype == "turn_aborted":
                 label = clean_prompt(str(payload.get("message") or payload.get("reason") or "interrupted"), 160)
                 ctx["interrupts"].append({"k": "x", "t0": ts, "t1": ts, "sub": int(sub), "l": label})
@@ -2057,37 +2149,31 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
     for name, entries in sub_streams:
         scan(entries, True, ctx, name)
 
-    candidates = [c for c in ctx["models"] if c["t1"] is not None]
-    if fmt == "codex":
-        latest_rid = max(candidates, key=lambda c: c["idx"])["rid"] if candidates else None
-        models = [c for c in candidates if isinstance(c.get("usage"), dict)
-                  or (live and c.get("rid") == latest_rid)]
-    else:
-        models = candidates
+    # Timestamped output is observed activity even if an interrupted request never
+    # receives confirmed usage. Retain it in static, live and fleet timelines alike.
+    models = [c for c in ctx["models"] if c["t1"] is not None]
     for c in models:
         if c["t0"] is None or c["t0"] > c["t1"]:
             c["t0"] = c["t1"]
         c["_in"], c["_cc"], c["_cr"], c["_out"], c["_think"], c["_think_rep"], c["_cc1h"] = _usage_numbers(c)
         tks = [b[0] for b in c["blocks"] if b[1] == "thinking" and b[0] is not None]
         c["_think_end"] = max(tks) if tks else None
-    # A live Codex response appears before its final token_count event. Keep that call in
-    # the activity/state timeline, but do not let its provisional zeroes replace the last
-    # measured context window or enter token, cost, and ledger accounting.
+    # Missing/provisional Codex usage must not replace the last measured context window
+    # or enter token, cost and ledger accounting, whether or not the session is live.
     metered_models = [c for c in models if isinstance(c.get("usage"), dict)] \
         if fmt == "codex" else models
     for c in models:
         if not c["sub"] and c["_think"] > 0:
             _item(ctx, c["idx"], c["t1"], "thinking", None, 0, c["_think"], {"transient": True})
-    model_rids = {c.get("rid") for c in models}
-    tools = [t for t in ctx["tools"] if t["t0"] is not None
-             and (fmt != "codex" or not t.get("_rid") or t.get("_rid") in model_rids)]
+    tools = [t for t in ctx["tools"] if t["t0"] is not None]
     prompts = sorted((p for p in ctx["prompts"] if p["t0"] is not None), key=lambda p: p["t0"])
     interrupts = [x for x in ctx["interrupts"] if x["t0"] is not None]
     errors = [x for x in ctx["errors"] if x["t0"] is not None]
 
     stamps = [c["t0"] for c in models] + [c["t1"] for c in models] + [p["t0"] for p in prompts] + \
              [t["t0"] for t in tools] + [t["t1"] for t in tools if t["t1"] is not None] + \
-             [x["t0"] for x in interrupts + errors]
+             [x["t0"] for x in interrupts + errors] + \
+             [d["completed_at"] for d in ctx["tool_details"]]
     if ctx.get("active_start_ts") is not None:
         stamps.append(ctx["active_start_ts"])
     else:
@@ -2137,7 +2223,12 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
         compactions.append({"k": "c", "t0": min(t0, ce["t1"]), "t1": ce["t1"], "l": ce["label"], "sub": 0})
     compactions.sort(key=lambda c: c["t0"])
 
-    tg, phase_method = _phase_split(models)
+    tg, phase_method = _phase_split(metered_models)
+    unmetered_models = [c for c in models if fmt == "codex" and not isinstance(c.get("usage"), dict)]
+    if unmetered_models:
+        # With no token counts, fall back to observed block boundaries. Applying a
+        # fitted decode rate to placeholder zero tokens would invent all-prefill time.
+        _phase_split(unmetered_models)
 
     intervals = []
     for c in models:
@@ -2256,9 +2347,14 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
         names = ", ".join(model_names) or "this model"
         pricing_note = f"No cited public API price is configured for {names}; dollar cost omitted."
 
+    if unmetered_models:
+        pricing_note += (f" {len(unmetered_models)} observed Codex call(s) have no confirmed usage; "
+                         "token and cost totals cover confirmed calls only. Their prefill/decode "
+                         "split is not separable; throughput is unavailable with partial usage.")
+
     stats = {
-        "tg_s": (tok_out / decode_time) if decode_time > 0 else None,
-        "pp_s": (tok_computed / prefill_time) if prefill_time > 0 else None,
+        "tg_s": (tok_out / decode_time) if decode_time > 0 and not unmetered_models else None,
+        "pp_s": (tok_computed / prefill_time) if prefill_time > 0 and not unmetered_models else None,
         "laps": len(laps),
         "avg_lap_s": (sum(lp["t1"] - lp["t0"] for lp in laps) / len(laps)) if laps else None,
         "time": {"wall": wall, "prefill": prefill_time, "reasoning": totals["reasoning"],
@@ -2271,6 +2367,7 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
                    "cache_hit_ratio": (tok_cached / (tok_cached + tok_computed)) if (tok_cached + tok_computed) else None},
         "context": {"used": ctx_used, "window": window, "pct": (ctx_used / window) if window else None},
         "counts": {"calls": len(models) + len(tools) + len(compactions), "assistant": len(models),
+                   "assistant_unmetered": len(unmetered_models),
                    "assistant_sub": sum(1 for c in models if c["sub"]), "tools": len(tools),
                    "tools_sub": sum(1 for t in tools if t["sub"]), "tool_errors": sum(t["err"] for t in tools),
                    "compactions": len(compactions), "interrupts": len([x for x in interrupts if x["k"] == "x"]),
@@ -2281,13 +2378,16 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
     base = t_start
     rel = lambda t: round(t - base, 3)
     calls = []
+    # Ledger rows follow confirmed main requests in file order, not all activity rows.
+    ledger_indices = {id(c): k for k, c in enumerate(sorted(main_models, key=lambda c: c["idx"]))}
     for c in sorted(models, key=lambda c: c["t0"]):
         pf, rs, _ = c["ph"]
         calls.append({"k": "m", "t0": rel(c["t0"]), "t1": rel(c["t1"]),
                       "p": [rel(c["t0"] + pf), rel(c["t0"] + pf + rs)],
                       "tok": [c["_in"] + c["_cc"], c["_cr"], c["_out"], c["_think"]],
                       "lap": lap_of(c["t0"]), "sub": c["sub"], "err": c["err"], "stop": c["stop"],
-                      "tools": c["tools"][:8], "m": c.get("model")})
+                      "tools": c["tools"][:8], "m": c.get("model"),
+                      "ledger_k": ledger_indices.get(id(c))})
     for t in sorted(tools, key=lambda t: t["t0"]):
         calls.append({"k": "t", "t0": rel(t["t0"]), "t1": rel(t["t1"]), "n": t["n"], "l": t["l"],
                       "lap": lap_of(t["t0"]), "sub": t["sub"], "err": t["err"], "ch": t["ch"], "open": t["open"]})
@@ -2345,7 +2445,8 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
     return {"meta": meta, "base": base, "end": rel(t_end), "stats": stats, "calls": calls,
             "laps": [{**lp, "t0": rel(lp["t0"]), "t1": rel(lp["t1"])} for lp in laps],
             "tools": tools_out, "idle": [[rel(a), rel(b), w] for a, b, w in idle_out],
-            "ledger": ledger}
+            "ledger": ledger,
+            "tool_details": sorted(ctx["tool_details"], key=lambda d: d["completed_at"])}
 
 
 # --------------------------------------------------------------------------- state (fleet)
@@ -2792,20 +2893,24 @@ def build_graph(payload):
 
     ledger = payload.get("ledger") or {}
     if ledger and not ledger.get("error"):
+        # Older payloads lack ledger_k and retain their positional mapping. New ones
+        # explicitly exclude unmetered activity and preserve the ledger's file order.
+        ledger_req_ids = {c.get("ledger_k", k): req_ids[k] for k, c in enumerate(models)
+                          if c.get("ledger_k", k) is not None}
         cats = set()
         for k, s in enumerate(ledger.get("series", [])):
-            if k >= len(req_ids):
-                break
+            if k not in ledger_req_ids:
+                continue
             for cat, tokens in s["g"].items():
                 if cat not in cats:
                     node(f"category:{cat}", "category", label=GROUP_LABELS.get(cat, cat))
                     cats.add(cat)
-                link(f"category:{cat}", req_ids[k], "present_in", weight=tokens)
+                link(f"category:{cat}", ledger_req_ids[k], "present_in", weight=tokens)
         for i, e in enumerate(ledger.get("events", [])):
             eid = node(f"rebuild:{i + 1}", "cache_rebuild", t=e["t"], recomputed=e["recomputed"], cause=e["cause"],
                        extra_cost=e.get("extra_cost"))
-            if e["k"] < len(req_ids):
-                link(eid, req_ids[e["k"]], "hits", weight=e["recomputed"])
+            if e["k"] in ledger_req_ids:
+                link(eid, ledger_req_ids[e["k"]], "hits", weight=e["recomputed"])
     return {"directed": True, "multigraph": False, "graph": {"session": meta.get("session_id"), "base": base,
             "tokenograph": __version__}, "nodes": nodes, "links": links}
 

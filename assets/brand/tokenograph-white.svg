@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Tokenograph — white</title>
+  <desc id="desc">The Context Loop mark in white for use on dark backgrounds.</desc>
+  <path d="M32 9a23 23 0 1 0 23 23" stroke="#ffffff" stroke-width="6" stroke-linecap="round"/>
+  <rect x="44" y="12" width="8" height="8" rx="1.5" transform="rotate(45 48 16)" fill="#ffffff"/>
+  <path d="M23 24h14M23 32h20M23 40h11" stroke="#ffffff" stroke-width="4.5" stroke-linecap="round"/>
+</svg>

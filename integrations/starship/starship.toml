@@ -1,0 +1,9 @@
+# Add ${custom.tokenograph} to your existing top-level format, before $character.
+# Replace /path/to/Tokenograph with your checkout's absolute path.
+[custom.tokenograph]
+description = "Tokenograph: confirmed session usage from a local cache"
+command = '"/path/to/Tokenograph/integrations/starship/prompt.sh" show'
+when = 'test -n "$TOKENOGRAPH_PROMPT_CACHE" && test -r "$TOKENOGRAPH_PROMPT_CACHE"'
+shell = ["sh"]
+format = "[TG](bold #79dac8) [$output](#bdbdbd)\n"
+unsafe_no_escape = false

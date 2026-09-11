@@ -101,6 +101,11 @@ table.ledger tr.sub td{border-top:none;color:var(--dim);padding-top:1px;padding-
 table.ledger tr.sub td.lab{padding-left:18px}
 table.ledger .bar{display:inline-block;height:8px;border-radius:2px;vertical-align:middle;margin-right:6px;min-width:1px}
 table.ledger .sw{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:7px;vertical-align:middle}
+.tool-detail{padding:7px 0 10px;text-align:left}
+.tool-detail .facts{display:flex;flex-wrap:wrap;gap:6px 16px;color:var(--dim);margin-bottom:4px}
+.tool-detail code{display:block;white-space:pre-wrap;overflow-wrap:anywhere;color:var(--text);font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+.tool-detail .failed{color:var(--err)}
+.tool-more{font:inherit;color:var(--text);background:var(--track);border:1px solid var(--line);border-radius:4px;padding:5px 9px;cursor:pointer}
 .ctx-block{margin-top:22px}
 .ctx-block h3{font-size:12px;letter-spacing:.08em;color:var(--dim);font-weight:500;margin:0 0 8px;text-transform:uppercase}
 .ev{display:flex;gap:12px;padding:6px 0;border-top:1px solid #17171b;font-size:12.5px;align-items:baseline}
@@ -163,6 +168,17 @@ footer b{color:var(--dim);font-weight:500}
   </section>
 
 
+  <section class="card" id="card-tool-details" hidden>
+    <div class="card-head" data-toggle>
+      <span class="chev">⌄</span><span class="ico">⌘</span><span>Tool details</span>
+      <span class="spacer"></span><span class="meta" id="tool-detail-count"></span>
+    </div>
+    <div class="card-body">
+      <table class="ledger" id="tool-detail-rows"></table>
+      <div class="ctx-notes">Expand a tool to inspect its recorded calls, newest first. Timeline ticks mark completion; unreported start times remain unknown. Reported durations can overlap. These records describe tools inside batches and do not add another charge or interval to session totals.</div>
+    </div>
+  </section>
+
   <section class="card" id="card-context">
     <div class="card-head" data-toggle>
       <span class="chev">⌄</span><span class="ico">▤</span><span>Context</span>
@@ -199,6 +215,8 @@ const C = {
 const PITCH = 30, BAR = 14, AXIS_H = 34, MIN_W = 1.2;
 let D = JSON.parse($('tokenograph-data').textContent);
 let rows = [], view = null, hover = null, dragging = null;
+const toolDetailExpanded = new Set();
+const toolDetailLimits = new Map();
 const cv = $('cv'), ctx = cv.getContext('2d'), cwrap = $('cwrap'), tip = $('tip');
 
 /* ---------- formatting ---------- */
@@ -337,6 +355,18 @@ function buildRows() {
     spans.sort((a, b) => a.t0 - b.t0);
     R.push({ id: 'tool:other', label: `${rest.length} other tools`, ind: true, color: C.tool2, spans, right: fmtInt(spans.length) });
   }
+  const details = D.tool_details || [], detailNames = new Map();
+  for (const d of details) {
+    if (!detailNames.has(d.name)) detailNames.set(d.name, []);
+    const t = d.completed_at - D.base;
+    detailNames.get(d.name).push({ t0: t, t1: t, c: { ...d, k: 'd', n: d.name, l: d.label, t0: t, err: d.status === 'failed' } });
+  }
+  if (details.length) {
+    R.push({ id: 'tool-completions', label: 'tool completions', group: true, right: fmtInt(details.length) });
+    for (const [name, spans] of [...detailNames].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))) {
+      R.push({ id: 'detail:' + name, label: name, ind: true, color: C.tool2, spans, right: fmtInt(spans.length) });
+    }
+  }
   R.push({ id: 'compaction', label: 'compaction', color: C.compaction, spans: comps.map(c => ({ t0: c.t0, t1: c.t1, c })), right: fmtInt(comps.length) });
   if (marks.length) R.push({ id: 'marks', label: 'interrupts / errors', color: C.err, spans: marks.map(c => ({ t0: c.t0, t1: c.t0, c, color: c.k === 'x' ? C.interrupt : C.err })), right: fmtInt(marks.length) });
   if (D.stats.time.idle > 1) R.push({ id: 'idle', label: 'idle', color: C.overhead, spans: D.idle.map(([t0, t1, w]) => ({ t0, t1, w, color: w === 'w' ? C.idle : C.overhead })), right: fmtH(D.stats.time.idle) });
@@ -473,6 +503,11 @@ function tipHtml(row, s) {
   }
   if (c.k === 't') return `<div class="t">${esc(c.n)}${c.sub ? ' (subagent)' : ''}${c.err ? ' · error' : ''}${c.open ? ' · still running' : ''}${lap}</div>` +
     `<div class="m">${fmtClockS(c.t0)} → ${fmtClockS(c.t1)} · ${fmtDur(c.t1 - c.t0)} · result ${fmtTok(c.ch)} chars (≈${fmtTok(c.ch / 4)} tokens)</div>` + (c.l ? `<code>${esc(c.l)}</code>` : '');
+  if (c.k === 'd') return `<div class="t">${esc(c.n)} · ${esc(c.status)}</div>` +
+    `<div class="m">completion recorded ${fmtClockS(c.t0)} · ${c.duration_s == null ? 'duration not reported' : fmtDur(c.duration_s) + ' reported duration'} · start time not reported</div>` +
+    (c.exit_code != null ? `<div class="m">exit ${esc(c.exit_code)}</div>` : '') +
+    (c.output_chars != null ? `<div class="m">result ${fmtTok(c.output_chars)} chars</div>` : '') +
+    `<code>${esc(c.l)}</code>`;
   if (c.k === 'c') return `<div class="t">compaction${lap}</div><div class="m">${fmtClockS(c.t0)} → ${fmtClockS(c.t1)} · ${fmtDur(c.t1 - c.t0)} · ${esc(c.l)}</div>`;
   if (c.k === 'x') return `<div class="t">interrupt${lap}</div><div class="m">${fmtClockS(c.t0)}</div><code>${esc(c.l)}</code>`;
   if (c.k === 'e') return `<div class="t">API error${lap}</div><div class="m">${fmtClockS(c.t0)}</div><code>${esc(c.l)}</code>`;
@@ -520,6 +555,14 @@ function wire() {
   });
   cv.addEventListener('dblclick', () => setView([0, D.end]));
   $('act-sum').addEventListener('click', e => { if (e.target.id === 'unzoom') setView([0, D.end]); });
+  $('tool-detail-rows').addEventListener('click', e => {
+    const more = e.target.closest('[data-tool-more]');
+    if (more) { const name = more.dataset.toolMore; toolDetailLimits.set(name, (toolDetailLimits.get(name) || 20) + 20); renderToolDetails(); return; }
+    const tr = e.target.closest('tr.grp'); if (!tr) return;
+    const open = tr.classList.toggle('open'), name = tr.dataset.key;
+    if (open) toolDetailExpanded.add(name); else toolDetailExpanded.delete(name);
+    $('tool-detail-rows').querySelectorAll(`tr.sub[data-p="${tr.dataset.i}"]`).forEach(x => { x.hidden = !open; });
+  });
   document.querySelectorAll('[data-toggle]').forEach(h => h.addEventListener('click', () => { h.parentElement.classList.toggle('collapsed'); if (h.parentElement.id === 'card-activity') requestAnimationFrame(draw); if (h.parentElement.id === 'card-context' && ctxAvailable()) requestAnimationFrame(drawCtx); }));
   window.addEventListener('resize', () => { draw(); if (ctxAvailable()) drawCtx(); });
 }
@@ -527,6 +570,7 @@ function wire() {
 function renderLegend() {
   const items = [['prefill', C.prefill], ['reasoning', C.reasoning], ['generation', C.generation], ['tools', C.tool], ['compaction', C.compaction], ['idle', C.overhead]];
   $('legend').innerHTML = items.map(([n, c]) => `<span><i class="dot" style="background:${c}"></i>${n}</span>`).join('') +
+    ((D.tool_details || []).length ? '<span class="m">tool completion ticks · reported durations in details</span>' : '') +
     `<span class="m">drag to zoom · double-click to reset · hover for detail</span>`;
 }
 function renderFooter() {
@@ -540,12 +584,40 @@ function renderFooter() {
 }
 
 
+function renderToolDetails() {
+  const details = D.tool_details || [], card = $('card-tool-details');
+  card.hidden = !details.length;
+  if (!details.length) return;
+  const groups = new Map();
+  for (const d of details) { if (!groups.has(d.name)) groups.set(d.name, []); groups.get(d.name).push(d); }
+  $('tool-detail-count').textContent = `${fmtInt(details.length)} recorded completions · ${groups.size} tools`;
+  const html = ['<tr><th>tool</th><th>recorded</th><th>failed</th><th>reported time</th></tr>'];
+  [...groups].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0])).forEach(([name, calls], i) => {
+    const open = toolDetailExpanded.has(name), timed = calls.filter(d => d.duration_s != null);
+    const duration = timed.reduce((sum, d) => sum + d.duration_s, 0), failed = calls.filter(d => d.status === 'failed').length;
+    html.push(`<tr class="grp${open ? ' open' : ''}" data-key="${esc(name)}" data-i="${i}"><td class="lab">${esc(name)}</td><td>${fmtInt(calls.length)}</td><td>${fmtInt(failed)}</td><td>${timed.length ? fmtDur(duration) : '–'}${timed.length && timed.length < calls.length ? ' (partial)' : ''}</td></tr>`);
+    const shown = [...calls].sort((a, b) => b.completed_at - a.completed_at).slice(0, toolDetailLimits.get(name) || 20);
+    for (const d of shown) {
+      const facts = [`${fmtClockS(d.completed_at - D.base)} completion`, esc(d.status), d.duration_s == null ? 'duration not reported' : fmtDur(d.duration_s) + ' reported'];
+      if (d.exit_code != null) facts.push('exit ' + esc(d.exit_code));
+      if (d.output_chars != null) facts.push(fmtTok(d.output_chars) + ' result chars');
+      html.push(`<tr class="sub" data-p="${i}"${open ? '' : ' hidden'}><td colspan="4" class="lab"><div class="tool-detail"><div class="facts${d.status === 'failed' ? ' failed' : ''}">${facts.map(f => '<span>' + f + '</span>').join('')}</div><code>${esc(d.detail || d.label || d.name)}${d.truncated ? '\n… truncated' : ''}</code></div></td></tr>`);
+    }
+    if (calls.length > shown.length) html.push(`<tr class="sub" data-p="${i}"${open ? '' : ' hidden'}><td colspan="4" class="lab"><button type="button" class="tool-more" data-tool-more="${esc(name)}">Show earlier calls · ${fmtInt(calls.length - shown.length)} more</button></td></tr>`);
+  });
+  $('tool-detail-rows').innerHTML = html.join('');
+}
+
+
 /* ---------- context ledger ---------- */
 const CG = { system:'#5b6b8a', residual:'#3b4a66', tool_schema:'#7dd3fc', attach:'#8b7bd6', skill:'#c084fc', prompt:'#f0c34a', image:'#e879a0', assistant:'#17b36b', tool_input:'#f5a623', tool_result:'#e0641a', thinking:'#7ee3b8', compaction:'#9b5cf6', custom:'#a3a3a3', bash_user:'#94a3b8' };
 const GORDER = ['system','residual','tool_schema','attach','skill','prompt','image','assistant','tool_input','tool_result','thinking','compaction','custom','bash_user'];
 const GLABEL = { system:'system prompt', residual:'tool schemas & unmeasured', tool_schema:'tool schemas loaded on demand', attach:'injected reminders & listings', skill:'loaded skills', prompt:'user prompts', image:'images', assistant:'assistant text', tool_input:'tool inputs', tool_result:'tool results', thinking:'re-sent thinking (this turn)', compaction:'compaction summaries', custom:'extension messages', bash_user:'user shell output' };
 const cv2 = $('cv2'), ctx2 = cv2.getContext('2d');
 let ctxSel = null, ctxHover = null;
+// Polling rebuilds these tables. Keep user choices by category, not row position:
+// new requests can reorder the categories or temporarily omit their subrows.
+const ctxExpanded = { 'ctx-now': new Set(), 'ctx-cum': new Set() };
 const groupColor = key => CG[key.split(':')[0]] || '#666';
 
 function ctxAvailable() { return D.ledger && !D.ledger.error && D.ledger.series && D.ledger.series.length; }
@@ -598,8 +670,9 @@ function renderNow(k) {
   $('ctx-now-title').textContent = `request ${(k == null ? latest : k) + 1} of ${L.series.length} · ${fmtClockS(s.t)} · ${fmtTok(s.m)} measured`;
   const html = ['<tr><th>category</th><th>tokens</th><th>window</th></tr>'];
   rows.forEach((r, i) => {
-    html.push(`<tr class="grp${r.subs && r.subs.length ? '' : ' leaf'}" data-i="${i}"><td class="lab"><span class="sw" style="background:${groupColor(r.key)}"></span>${esc(r.label)}</td><td><span class="bar" style="width:${Math.round(r.tokens / maxT * 70)}px;background:${groupColor(r.key)}"></span>${fmtTok(r.tokens)}</td><td>${r.pct == null ? '–' : (r.pct * 100).toFixed(1) + '%'}</td></tr>`);
-    for (const sub of (r.subs || [])) html.push(`<tr class="sub" data-p="${i}" hidden><td class="lab">${esc(sub.label)}</td><td>${fmtTok(sub.tokens)}</td><td>${L.window ? (sub.tokens / L.window * 100).toFixed(1) + '%' : '–'}</td></tr>`);
+    const hasSubs = !!(r.subs && r.subs.length), open = hasSubs && ctxExpanded['ctx-now'].has(r.key);
+    html.push(`<tr class="grp${hasSubs ? '' : ' leaf'}${open ? ' open' : ''}" data-i="${i}" data-key="${esc(r.key)}"><td class="lab"><span class="sw" style="background:${groupColor(r.key)}"></span>${esc(r.label)}</td><td><span class="bar" style="width:${Math.round(r.tokens / maxT * 70)}px;background:${groupColor(r.key)}"></span>${fmtTok(r.tokens)}</td><td>${r.pct == null ? '–' : (r.pct * 100).toFixed(1) + '%'}</td></tr>`);
+    for (const sub of (r.subs || [])) html.push(`<tr class="sub" data-p="${i}"${open ? '' : ' hidden'}><td class="lab">${esc(sub.label)}</td><td>${fmtTok(sub.tokens)}</td><td>${L.window ? (sub.tokens / L.window * 100).toFixed(1) + '%' : '–'}</td></tr>`);
   });
   html.push(`<tr><td class="lab" style="color:var(--dim)">accounted</td><td style="color:var(--dim)">${fmtTok(total)}</td><td style="color:var(--dim)">${L.window ? (total / L.window * 100).toFixed(1) + '%' : '–'}</td></tr>`);
   $('ctx-now').innerHTML = html.join('');
@@ -611,8 +684,9 @@ function renderCum() {
   const hasCost = rows.some(r => r.cost != null);
   const html = [`<tr><th>category</th><th title="tokens computed (uncached input + cache writes) across all requests">computed</th><th title="tokens served from the prompt cache across all requests">cached</th><th title="computed + cache-read-weighted cached (×${rd})">share</th>${hasCost ? '<th>cost</th>' : ''}</tr>`];
   rows.forEach((r, i) => {
-    html.push(`<tr class="grp${r.subs ? '' : ' leaf'}" data-i="${i}"><td class="lab"><span class="sw" style="background:${groupColor(r.key)}"></span>${esc(r.label)}</td><td>${fmtTok(r.computed)}</td><td>${fmtTok(r.cached)}</td><td><span class="bar" style="width:${Math.round(eff(r) / maxE * 60)}px;background:${groupColor(r.key)}"></span>${totE ? (eff(r) / totE * 100).toFixed(1) + '%' : '–'}</td>${hasCost ? `<td>${r.cost == null ? '–' : '$' + r.cost.toFixed(2)}</td>` : ''}</tr>`);
-    for (const sub of (r.subs || [])) html.push(`<tr class="sub" data-p="${i}" hidden><td class="lab">${esc(sub.label)}</td><td>${fmtTok(sub.computed)}</td><td>${fmtTok(sub.cached)}</td><td></td>${hasCost ? `<td>${sub.cost == null ? '–' : '$' + sub.cost.toFixed(2)}</td>` : ''}</tr>`);
+    const hasSubs = !!(r.subs && r.subs.length), open = hasSubs && ctxExpanded['ctx-cum'].has(r.key);
+    html.push(`<tr class="grp${hasSubs ? '' : ' leaf'}${open ? ' open' : ''}" data-i="${i}" data-key="${esc(r.key)}"><td class="lab"><span class="sw" style="background:${groupColor(r.key)}"></span>${esc(r.label)}</td><td>${fmtTok(r.computed)}</td><td>${fmtTok(r.cached)}</td><td><span class="bar" style="width:${Math.round(eff(r) / maxE * 60)}px;background:${groupColor(r.key)}"></span>${totE ? (eff(r) / totE * 100).toFixed(1) + '%' : '–'}</td>${hasCost ? `<td>${r.cost == null ? '–' : '$' + r.cost.toFixed(2)}</td>` : ''}</tr>`);
+    for (const sub of (r.subs || [])) html.push(`<tr class="sub" data-p="${i}"${open ? '' : ' hidden'}><td class="lab">${esc(sub.label)}</td><td>${fmtTok(sub.computed)}</td><td>${fmtTok(sub.cached)}</td><td></td>${hasCost ? `<td>${sub.cost == null ? '–' : '$' + sub.cost.toFixed(2)}</td>` : ''}</tr>`);
   });
   $('ctx-cum').innerHTML = html.join('');
 }
@@ -689,12 +763,14 @@ function wireCtx() {
   for (const id of ['ctx-now', 'ctx-cum']) $(id).addEventListener('click', e => {
     const tr = e.target.closest('tr.grp'); if (!tr || tr.classList.contains('leaf')) return;
     tr.classList.toggle('open'); const i = tr.dataset.i;
+    if (tr.classList.contains('open')) ctxExpanded[id].add(tr.dataset.key);
+    else ctxExpanded[id].delete(tr.dataset.key);
     $(id).querySelectorAll(`tr.sub[data-p="${i}"]`).forEach(x => { x.hidden = !tr.classList.contains('open'); });
   });
 }
 
 function renderAll(keepView) {
-  renderHeader(); renderStats(); rows = buildRows(); renderRowLabels(); renderLegend(); renderFooter(); renderContext();
+  renderHeader(); renderStats(); rows = buildRows(); renderRowLabels(); renderLegend(); renderFooter(); renderToolDetails(); renderContext();
   if (!keepView || !view) view = [0, D.end]; else view = [Math.max(0, view[0]), Math.min(D.end, view[1])];
   $('act-sum').innerHTML = summaryHtml();
   draw();

@@ -18,8 +18,35 @@ def codex_entries():
 
 
 class CodexAdapterTests(unittest.TestCase):
+    def test_provisional_usage_requires_changed_cumulative_totals(self):
+        entries = codex_entries()
+        counter = next(e for e in reversed(entries)
+                       if e.get("payload", {}).get("type") == "token_count")
+        usage = counter["payload"]["info"]["last_token_usage"]
+        expected = tokenograph.analyze(entries)["stats"]["tokens"]["total"]
+        entries.extend([
+            {"timestamp": "2026-08-20T12:01:00Z", "type": "response_item",
+             "payload": {"type": "message", "role": "assistant", "content": [
+                 {"type": "output_text", "text": "Unconfirmed next response"}]}},
+            {"timestamp": "2026-08-20T12:01:01Z", "type": "token_usage_record",
+             "payload": {"usage": usage}},
+            dict(counter, timestamp="2026-08-20T12:01:02Z"),
+        ])
+        self.assertEqual(tokenograph.analyze(entries)["stats"]["tokens"]["total"], expected)
+
     def test_format_detection(self):
         self.assertEqual(tokenograph.detect_format(codex_entries(), FIXTURE), "codex")
+
+    def test_confirmed_counter_corrects_provisional_usage(self):
+        entries = codex_entries()
+        idx = next(i for i, e in enumerate(entries)
+                   if e.get("payload", {}).get("type") == "token_count")
+        usage = dict(entries[idx]["payload"]["info"]["last_token_usage"])
+        usage["output_tokens"] += 1
+        expected = tokenograph.analyze(entries)["stats"]["tokens"]["total"]
+        entries.insert(idx, {"timestamp": entries[idx]["timestamp"],
+                            "type": "token_usage_record", "payload": {"usage": usage}})
+        self.assertEqual(tokenograph.analyze(entries)["stats"]["tokens"]["total"], expected)
 
     def test_first_prompt_uses_the_active_codex_turn(self):
         self.assertEqual(tokenograph.first_prompt(FIXTURE), "port the fixture adapter")
@@ -244,6 +271,94 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertAlmostEqual(cost["cache_read"], 200000 * 0.1 * 4.0 * 2.0 / 1e6, places=12)
         self.assertAlmostEqual(ledger_cost, cost["input"] + cost["cache_write"] + cost["cache_read"], places=9)
 
+    def test_astra_cost_at_and_above_long_context_boundary(self):
+        # The surcharge applies to the whole request only when input exceeds 272K.
+        # Include cache writes/reads and reasoning to catch overlap or double billing.
+        for input_tokens, input_mult, output_mult in [(272000, 1, 1), (272001, 2, 1.5)]:
+            with self.subTest(input_tokens=input_tokens):
+                usage = {"input_tokens": input_tokens, "cached_input_tokens": 200000,
+                         "cache_write_input_tokens": 20000, "output_tokens": 1000,
+                         "reasoning_output_tokens": 600}
+                entries = [
+                    {"timestamp": "2026-09-11T12:00:00Z", "type": "session_meta",
+                     "payload": {"id": "astra-pricing-fixture", "cwd": "/work/fixture"}},
+                    {"timestamp": "2026-09-11T12:00:01Z", "type": "turn_context",
+                     "payload": {"model": "gpt-6-astra"}},
+                    {"timestamp": "2026-09-11T12:00:02Z", "type": "response_item",
+                     "payload": {"type": "message", "role": "assistant", "phase": "final",
+                                 "content": [{"type": "output_text", "text": "fixture answer"}]}},
+                    {"timestamp": "2026-09-11T12:00:03Z", "type": "event_msg",
+                     "payload": {"type": "token_count", "info": {
+                         "last_token_usage": usage, "total_token_usage": usage,
+                         "model_context_window": 1050000}}},
+                ]
+                payload = tokenograph.analyze(entries)
+                cost = payload["stats"]["cost"]
+                self.assertAlmostEqual(cost["input"], (input_tokens - 220000) * 10 * input_mult / 1e6)
+                self.assertAlmostEqual(cost["cache_write"], 20000 * 12.5 * input_mult / 1e6)
+                self.assertAlmostEqual(cost["cache_read"], 200000 * input_mult / 1e6)
+                self.assertAlmostEqual(cost["output"], 1000 * 50 * output_mult / 1e6)
+                self.assertEqual(cost["pricing"]["long_context_requests"], int(input_tokens > 272000))
+                self.assertIn("2026-09-11", cost["pricing"]["source"])
+                self.assertEqual(cost["pricing"]["source_url"],
+                                 "https://developers.openai.com/api/docs/models/gpt-6-astra")
+                ledger_cost = sum(row["cost"] for row in payload["ledger"]["cum"]["rows"])
+                self.assertAlmostEqual(ledger_cost, cost["total"] - cost["output"], places=9)
+        self.assertIsNone(tokenograph.pricing_for("gpt-6-astra-unpublished"))
+
+    def test_inner_tool_details_do_not_duplicate_accounting_or_infer_starts(self):
+        entries = codex_entries()
+        baseline = tokenograph.analyze(entries)
+        detail = {"timestamp": "2026-08-20T12:00:07Z", "type": "event_msg", "payload": {
+            "type": "item_completed", "item": {"type": "CommandExecution", "id": "inner-one",
+                "command": ["zsh", "-c", "rg synthetic-query"], "status": "completed", "exit_code": 0,
+                "duration": {"secs": 0, "nanos": 250000000}, "aggregated_output": "example result"}}}
+        entries[6:6] = [detail, detail]
+        payload = tokenograph.analyze(entries)
+        self.assertEqual(payload["stats"], baseline["stats"])
+        self.assertEqual(payload["calls"], baseline["calls"])
+        self.assertEqual(payload["ledger"], baseline["ledger"])
+        self.assertEqual(len(payload["tool_details"]), 1)
+        tool = payload["tool_details"][0]
+        self.assertEqual(tool["name"], "exec_command")
+        self.assertEqual(tool["label"], "rg synthetic-query")
+        self.assertEqual(tool["duration_s"], .25)
+        self.assertEqual(tool["output_chars"], len("example result"))
+        self.assertNotIn("started_at", tool)
+        # A later completion must still fit on a static timeline. Extend the
+        # observed clock once, without adding its reported duration as an interval.
+        late = json.loads(json.dumps(detail))
+        late["timestamp"] = "2026-08-20T12:00:13Z"
+        late["payload"]["item"]["id"] = "late"
+        later = tokenograph.analyze(entries + [late])
+        self.assertEqual(later["end"], 13)
+        self.assertEqual(later["stats"]["tokens"], baseline["stats"]["tokens"])
+        self.assertEqual(later["stats"]["counts"], baseline["stats"]["counts"])
+        times = later["stats"]["time"]
+        self.assertAlmostEqual(times["wall"], sum(times[k] for k in
+            ("prefill", "reasoning", "generation", "tools", "compaction", "idle")))
+
+    def test_tool_details_exclude_replayed_legacy_history_and_private_reasoning(self):
+        entries = codex_entries()
+        entries[0]["payload"]["history_mode"] = "legacy"
+        old = {"timestamp": "2026-08-20T12:00:05.500Z", "type": "event_msg", "payload": {
+            "type": "item_completed", "item": {"type": "McpToolCall", "id": "old",
+                "server": "docs", "tool": "read", "arguments": {"query": "old"}, "status": "completed"}}}
+        new = json.loads(json.dumps(old))
+        new["timestamp"] = "2026-08-20T12:00:07Z"
+        new["payload"]["item"].update(id="new", arguments={"title": "fixture docs"}, result={"isError": True})
+        reasoning = {"timestamp": "2026-08-20T12:00:07.500Z", "type": "event_msg", "payload": {
+            "type": "item_completed", "item": {"type": "Reasoning", "id": "r", "raw_content": "not for tool details"}}}
+        entries[6:6] = [old, {"timestamp": "2026-08-20T12:00:06.500Z", "type": "event_msg",
+                             "payload": {"type": "task_started"}}, new, reasoning]
+        details = tokenograph.analyze(entries)["tool_details"]
+        self.assertEqual([d["id"] for d in details], ["new"])
+        self.assertEqual(details[0]["name"], "docs.read")
+        self.assertEqual(details[0]["label"], "fixture docs")
+        self.assertEqual(details[0]["status"], "failed")
+        self.assertIsNone(details[0]["duration_s"])
+        self.assertNotIn("not for tool details", json.dumps(details))
+
     def test_mixed_model_cost_discloses_every_pricing_source(self):
         entries = codex_entries()
         entries.insert(9, {"timestamp": "2026-08-20T12:00:09Z", "type": "turn_context",
@@ -460,6 +575,113 @@ class CodexAdapterTests(unittest.TestCase):
 
         self.assertEqual(payload["stats"]["counts"]["tool_errors"], 2)
         self.assertTrue(all(call["err"] for call in payload["calls"] if call["k"] == "t"))
+
+    def test_unmetered_interrupted_activity_survives_later_confirmed_calls(self):
+        entries = [
+            {"timestamp": "2026-08-20T12:00:00Z", "type": "session_meta",
+             "payload": {"id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "cwd": "/work/interrupt"}},
+            {"timestamp": "2026-08-20T12:00:01Z", "type": "turn_context",
+             "payload": {"model": "gpt-5.6-sol"}},
+            {"timestamp": "2026-08-20T12:00:01.100Z", "type": "event_msg",
+             "payload": {"type": "user_message", "message": "run the tool"}},
+            {"timestamp": "2026-08-20T12:00:02Z", "type": "response_item",
+             "payload": {"type": "function_call", "name": "exec_command", "call_id": "tool-1",
+                         "arguments": "{\"cmd\":\"sleep 2\"}"}},
+            {"timestamp": "2026-08-20T12:00:04Z", "type": "response_item",
+             "payload": {"type": "function_call_output", "call_id": "tool-1",
+                         "output": "interrupted", "is_error": True}},
+            {"timestamp": "2026-08-20T12:00:05Z", "type": "event_msg",
+             "payload": {"type": "turn_aborted", "reason": "interrupted"}},
+        ]
+        usage = {"input_tokens": 100, "cached_input_tokens": 40, "output_tokens": 20,
+                 "reasoning_output_tokens": 5}
+        later = [
+            {"timestamp": "2026-08-20T12:00:06Z", "type": "event_msg",
+             "payload": {"type": "user_message", "message": "try again"}},
+            {"timestamp": "2026-08-20T12:00:07Z", "type": "response_item",
+             "payload": {"type": "message", "role": "assistant", "phase": "final",
+                         "content": [{"type": "output_text", "text": "Done."}]}},
+            {"timestamp": "2026-08-20T12:00:07.100Z", "type": "event_msg",
+             "payload": {"type": "token_count", "info": {
+                 "last_token_usage": usage, "total_token_usage": usage,
+                 "model_context_window": 121600}}},
+        ]
+        confirmed = tokenograph.analyze(entries[:3] + later)
+        now = tokenograph.parse_ts("2026-08-20T12:00:08Z")
+        for suffix in ([], later):
+            for live in (False, True):
+                with self.subTest(later_confirmed=bool(suffix), live=live):
+                    payload = tokenograph.analyze(entries + suffix, live=live, now=now)
+                    stats = payload["stats"]
+                    self.assertEqual(stats["counts"]["assistant"], 2 if suffix else 1)
+                    self.assertEqual(stats["counts"]["tools"], 1)
+                    self.assertEqual(stats["counts"]["tool_errors"], 1)
+                    self.assertEqual(stats["counts"]["interrupts"], 1)
+                    self.assertEqual(stats["time"]["tools"], 2.0)
+                    self.assertEqual(stats["tokens"]["total"], 120 if suffix else 0)
+                    self.assertEqual(payload["meta"]["models"], ["gpt-5.6-sol"])
+                    tool = next(c for c in payload["calls"] if c["k"] == "t")
+                    self.assertEqual(tool["t1"] - tool["t0"], 2.0)
+                    self.assertFalse(tool["open"])
+                    timing = stats["time"]
+                    self.assertAlmostEqual(sum(timing[k] for k in (
+                        "prefill", "reasoning", "generation", "tools", "compaction", "idle")),
+                        timing["wall"], places=6)
+                    if suffix:
+                        self.assertEqual(stats["cost"], confirmed["stats"]["cost"])
+                        self.assertEqual(stats["context"], confirmed["stats"]["context"])
+                        self.assertEqual(payload["ledger"]["cum"]["requests"], 1)
+                        graph = tokenograph.build_graph(payload)
+                        self.assertEqual({edge["target"] for edge in graph["links"]
+                                          if edge["kind"] == "present_in"}, {"request:2"})
+                        for request in payload["ledger"]["series"]:
+                            self.assertLessEqual(sum(request["g"].values()), request["m"])
+                    else:
+                        self.assertIsNone(stats["cost"])
+                        self.assertIsNone(payload["ledger"])
+
+    def test_unconfirmed_usage_preserves_activity_but_not_accounting(self):
+        entries = [
+            {"timestamp": "2026-08-20T12:00:00Z", "type": "session_meta",
+             "payload": {"id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "cwd": "/work/provisional"}},
+            {"timestamp": "2026-08-20T12:00:01Z", "type": "turn_context",
+             "payload": {"model": "gpt-5.6-sol"}},
+            {"timestamp": "2026-08-20T12:00:02Z", "type": "response_item",
+             "payload": {"type": "reasoning", "encrypted_content": "opaque-synthetic-reasoning"}},
+            {"timestamp": "2026-08-20T12:00:03Z", "type": "token_usage_record",
+             "payload": {"usage": {"input_tokens": 100, "cached_input_tokens": 40,
+                                    "output_tokens": 20, "reasoning_output_tokens": 8}}},
+        ]
+        now = tokenograph.parse_ts("2026-08-20T12:00:04Z")
+        for live in (False, True):
+            with self.subTest(live=live):
+                payload = tokenograph.analyze(entries, live=live, now=now)
+                self.assertEqual(payload["stats"]["counts"]["assistant"], 1)
+                self.assertGreater(payload["stats"]["time"]["reasoning"], 0)
+                self.assertEqual(payload["stats"]["tokens"]["total"], 0)
+                self.assertEqual(payload["stats"]["context"]["used"], 0)
+                self.assertIsNone(payload["stats"]["cost"])
+                self.assertIsNone(payload["ledger"])
+                self.assertNotIn("opaque-synthetic-reasoning", json.dumps(payload))
+
+    def test_missing_usage_is_not_inferred_as_prefill_or_measured_throughput(self):
+        entries = codex_entries() + [
+            {"timestamp": "2026-08-20T12:00:13Z", "type": "event_msg",
+             "payload": {"type": "user_message", "message": "keep thinking"}},
+            {"timestamp": "2026-08-20T12:00:14Z", "type": "response_item",
+             "payload": {"type": "reasoning", "encrypted_content": "opaque-synthetic-reasoning"}},
+        ]
+        baseline = tokenograph.analyze(codex_entries())
+        payload = tokenograph.analyze(entries)
+        last = [call for call in payload["calls"] if call["k"] == "m"][-1]
+
+        self.assertEqual(last["p"], [last["t0"], last["t1"]])
+        self.assertIsNone(payload["stats"]["tg_s"])
+        self.assertIsNone(payload["stats"]["pp_s"])
+        self.assertEqual(payload["stats"]["counts"]["assistant_unmetered"], 1)
+        self.assertIn("totals cover confirmed calls only", payload["meta"]["pricing_note"])
+        self.assertEqual(payload["stats"]["tokens"], baseline["stats"]["tokens"])
+        self.assertEqual(payload["stats"]["cost"], baseline["stats"]["cost"])
 
     def test_live_usage_pending_reasoning_is_working(self):
         entries = [

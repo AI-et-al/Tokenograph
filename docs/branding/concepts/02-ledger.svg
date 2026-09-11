@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Tokenograph — Ledger</title>
+  <desc id="desc">Three measured rows of decreasing length held by a single accounting bracket.</desc>
+  <path d="M18 11h-7v42h7" stroke="#2f8ff5" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M27 15h25M27 32h18M27 49h11" stroke="#7ee3b8" stroke-width="6" stroke-linecap="round"/>
+</svg>

@@ -129,6 +129,26 @@ class HandBuiltTests(unittest.TestCase):
         self.assertEqual(d["stats"]["context"]["used"], 51000)
         self.assertEqual(d["stats"]["context"]["window"], 200000)
 
+    def test_metadata_arriving_in_later_entries_is_retained(self):
+        entries = [
+            {"type": "system", "timestamp": "2026-01-01T00:00:00Z", "sessionId": "s1"},
+            {"type": "user", "timestamp": "2026-01-01T00:00:01Z", "cwd": "/work/project",
+             "message": {"role": "user", "content": "hello"}},
+            {"type": "system", "timestamp": "2026-01-01T00:00:02Z", "gitBranch": "main"},
+            {"type": "system", "timestamp": "2026-01-01T00:00:03Z", "version": "2.1.0"},
+            # Retain the original identity, even after all fields have arrived.
+            {"type": "system", "timestamp": "2026-01-01T00:00:04Z", "sessionId": "other",
+             "cwd": "/other", "gitBranch": "other", "version": "other"},
+        ]
+
+        meta = tokenograph.analyze(entries, source="synthetic-late-metadata")["meta"]
+
+        self.assertEqual(meta["session_id"], "s1")
+        self.assertEqual(meta["cwd"], "/work/project")
+        self.assertEqual(meta["git_branch"], "main")
+        self.assertEqual(meta["cli_version"], "2.1.0")
+        self.assertEqual(meta["agent_label"], "Claude Code")
+
     def test_no_decode_observation_falls_back(self):
         # a single request with only a thinking block: decode speed cannot be observed
         d = tokenograph.analyze(self.transcript()[:5] + [entry("user", "2026-01-01T00:00:20.000Z", message={"role": "user", "content": "x"})], source="mem")

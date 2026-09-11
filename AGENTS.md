@@ -29,6 +29,9 @@ python3 -m unittest discover -s tests          # must pass before any push
 tokenograph/__init__.py   everything: adapters, phases, ledger, graph, fleet, CLI
 tokenograph/panel.html    session page; __TOKENOGRAPH_DATA__ is replaced with the JSON payload
 tokenograph/fleet.html    fleet page
+tokenograph/live.py       read-only terminal telemetry stream
+tokenograph/prompt.py     cached prompt summary and opt-in collector
+integrations/             Starship helpers and optional Vesper terminal viewer
 examples/make_sample.py   synthetic transcript generator with ground-truth timings (the test oracle)
 tests/                    unittest; hand-built transcripts for all formats, a fake herdr socket
 docs/field-notes.md       evidence, method, paper notes, the numbers behind the claims
@@ -94,10 +97,13 @@ Codex CLI rollouts, `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`:
   cross-version id, so do not invent an interval. A `response_item` `agent_message` is
   inter-agent input, while an `event_msg` `agent_message` can be assistant-output fallback.
 - `token_count.info.last_token_usage` is per request and `total_token_usage` is cumulative.
-  Only changed cumulative totals make a call. Normalize uncached input as
+  Only changed cumulative totals confirm per-request usage. Keep timestamped output and
+  tools visible even without usage (including static views and interrupted earlier calls);
+  exclude unconfirmed usage from tokens, cost, and the measured ledger. Normalize uncached input as
   `max(0, input - cached_input - cache_write_input)`; reasoning is a subset of output.
   `model_context_window` is the numeric window. Newer CLIs may emit an earlier
-  provisional `token_usage_record`; commit it only when the delayed `token_count` matches.
+  provisional `token_usage_record`; commit it only when a changed delayed `token_count`
+  confirms or corrects it within the same request. Unchanged cumulative totals never confirm it.
   Standalone records before `compacted` and at a live tail are not session totals.
 - Reasoning and compaction content is encrypted. Use reported `reasoning_output_tokens`
   and a zero-sized `compacted` marker; never estimate plaintext reasoning from ciphertext.
@@ -147,5 +153,26 @@ id that herdr's integrations report at session start. The fleet joins on that.
   `python3 -m tokenograph build /tmp/s.jsonl -o /tmp/s.html` and screenshot it.
 - Keep the pricing table dated (`PRICING_DATE`) and let `--price` override it.
 - The panel is deliberately single-theme dark, matching the reference it was built from.
+- Starship redraws only with the shell prompt; continuous animation belongs to the
+  terminal viewer. Keep collectors opt-in and pinned to an explicit session. Do not
+  scan transcripts or call models in the prompt-rendering command.
 - When in doubt about what the transcript contains, print entries; the format is not
   documented anywhere but the files themselves, and it changes between CLI versions.
+
+## Product direction — accepted 2026-09-05
+
+`docs/roadmap.md` is the owner's accepted big-picture lens, not a launch schedule.
+There is no short-term urgency to promote it: improve its usefulness in our own sessions
+first. Wider sharing is an option, with trust/privacy/distribution safeguards before any
+beta; advice and expansion should follow demonstrated use. Publication and a license
+choice still require explicit owner approval. Preserve this direction unless the owner
+revises it; do not turn the optional release milestones into an unsolicited launch project.
+
+The owner selected the **Context Loop** icon (concept 1) on 2026-09-05. Final assets and
+usage notes live in `assets/brand/`; the five studies remain in `docs/branding/concepts/`.
+The selection does not authorize changing the existing panel or wordmark automatically.
+
+On 2026-09-11 the owner approved pushing the completed source as a development beta
+checkpoint, including the Starship summary and optional Vesper viewer integration.
+This does not request a package release, license change, or promotion. Keep the synthetic
+README image until a more representative session is selected for a later walkthrough.

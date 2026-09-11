@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Tokenograph</title>
+  <desc id="desc">Small-size Context Loop mark, with pixel-aligned ledger rows and a dark background.</desc>
+  <rect width="16" height="16" rx="3.5" fill="#0b0b0d"/>
+  <path d="M8 2.25a5.75 5.75 0 1 0 5.75 5.75" stroke="#2f8ff5" stroke-width="1.5" stroke-linecap="round"/>
+  <rect x="11" y="3" width="2" height="2" rx=".375" transform="rotate(45 12 4)" fill="#7ee3b8"/>
+  <g fill="#7ee3b8">
+    <rect x="5" y="5" width="4" height="1" rx=".5"/>
+    <rect x="5" y="7" width="6" height="1" rx=".5"/>
+    <rect x="5" y="9" width="3" height="1" rx=".5"/>
+  </g>
+</svg>

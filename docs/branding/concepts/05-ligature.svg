@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Tokenograph — Ligature</title>
+  <desc id="desc">A custom lowercase t and g ligature, with the g returning beneath itself like reused context.</desc>
+  <path d="M9 22h19M18 10v32q0 7 7 7h2" stroke="#7ee3b8" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M55 16v28q0 11-11 11h-9M55 29a13 13 0 1 1-13-13h13" stroke="#2f8ff5" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

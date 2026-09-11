@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Tokenograph — Aperture</title>
+  <desc id="desc">Four context-window corners frame three measured columns of token activity.</desc>
+  <path d="M22 10H10v12m32-12h12v12M10 42v12h12m20 0h12V42" stroke="#2f8ff5" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M22 42v-8m10 8V27m10 15V20" stroke="#7ee3b8" stroke-width="5.5" stroke-linecap="round"/>
+</svg>

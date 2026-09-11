@@ -3,3 +3,8 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.lavish/
+.playwright-cli/
+output/
+/panel.html
+/session.graphml
