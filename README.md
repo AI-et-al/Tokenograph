@@ -3,8 +3,12 @@
 Tokenometrics for coding-agent sessions. Point it at a Claude Code transcript, a Codex
 CLI rollout, or a pi session and it renders one page: throughput, an additive wall-clock
 split, token and cost accounting, a per-row timeline of every call, and a ledger of what is in the context
-window, what each part has cost, and why the cache was rebuilt. It also exports the
-session as a property graph and watches a whole fleet of sessions with herdr's states.
+window, what each part has cost, and why the cache was rebuilt. An optional Starship
+integration puts a session summary above your working shell prompt. Tokenograph also
+exports the session as a property graph and watches a whole fleet with herdr's states.
+
+[Starship prompt integration](#starship-prompt-integration) ·
+[Terminal usage](#using-it-from-the-terminal)
 
 ![tokenograph on a synthetic 16-hour run](examples/sample-panel.png)
 
@@ -32,6 +36,37 @@ next to a Claude Code session are merged in (`--no-subagents` to skip).
 
 Agents starting a session in this folder: read `AGENTS.md` first. The evidence behind
 every claim below is in `docs/field-notes.md`.
+
+## Starship prompt integration
+
+Keep session usage visible **above the prompt you type into**. The optional Starship
+module adds a Moonfly-accented summary with the model and session, context usage, total
+tokens, cache-hit ratio, cost, tool/error counts, the last named tool, and usage age.
+Estimated costs retain their `~`; unavailable usage or pricing is labelled.
+
+Follow the [Starship setup guide](integrations/starship/README.md) to add the custom
+module and source the zsh helper. Then, in an interactive terminal:
+
+```zsh
+tg-on SESSION_ID_OR_PATH   # select a session and show its summary in this shell
+tg-off                    # hide the summary and stop this shell's collector
+```
+
+Your normal typing prompt stays below the summary. Each terminal opts in separately
+and stays pinned to the session you selected. `tg-on` activates Starship in that shell,
+including when Powerlevel10k was loaded last; `tg-off` removes the summary, while
+Starship remains active until the shell closes. New terminals use your usual startup
+configuration.
+
+**The summary refreshes when the shell redraws its prompt.** While Codex or Claude
+owns the terminal, its own input area remains in control; the Starship summary appears
+again when you return to the shell. For a continuously updating display during agent
+work, the separate [Vesper terminal viewer](integrations/vesper-viewer/README.md)
+provides a live strip alongside task activity and requires a compatible Vesper companion.
+
+A background collector checks the selected transcript and writes a small local cache.
+Starship only reads that cache when drawing the prompt, keeping transcript analysis
+and model calls out of the prompt command.
 
 ## Using it from the terminal
 
@@ -68,13 +103,6 @@ tokenograph serve b5210cab --port 9000 --interval 5
 The page polls the file; the spinner beside the context ring means live. Leave it open
 for the whole run: the rebuild list and the re-sent-history line are most useful at the
 moment they change.
-
-**A summary in your Starship prompt.** The optional
-[Starship integration](integrations/starship/README.md) adds a Moonfly-accented line with
-model, context, session tokens, cache use, cost, and named tool activity. Enable it with
-`tg-on SESSION_ID_OR_PATH` after installing the helper; `tg-off` stops it. Each shell is
-opt-in and pinned to its selected session. The prompt reads a small local cache on
-redraw, with no model calls or transcript parsing in the prompt command.
 
 **Continuous terminal telemetry.** `python3 -m tokenograph.live SESSION --once` emits a
 snapshot for other frontends; omit `--once` to stream changes. The optional
