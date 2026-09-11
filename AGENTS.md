@@ -31,7 +31,7 @@ tokenograph/panel.html    session page; __TOKENOGRAPH_DATA__ is replaced with th
 tokenograph/fleet.html    fleet page
 tokenograph/live.py       read-only terminal telemetry stream
 tokenograph/prompt.py     cached prompt summary and opt-in collector
-integrations/             Starship helpers and optional Vesper terminal viewer
+integrations/             Starship helpers and optional Tokenograph terminal viewer
 examples/make_sample.py   synthetic transcript generator with ground-truth timings (the test oracle)
 tests/                    unittest; hand-built transcripts for all formats, a fake herdr socket
 docs/field-notes.md       evidence, method, paper notes, the numbers behind the claims
@@ -153,6 +153,8 @@ id that herdr's integrations report at session start. The fleet joins on that.
   `python3 -m tokenograph build /tmp/s.jsonl -o /tmp/s.html` and screenshot it.
 - Keep the pricing table dated (`PRICING_DATE`) and let `--price` override it.
 - The panel is deliberately single-theme dark, matching the reference it was built from.
+- Tokenograph components use Tokenograph names. A selected speech voice is a personal
+  setting and must not become a component, integration, or product name.
 - Starship redraws only with the shell prompt; continuous animation belongs to the
   terminal viewer. Keep collectors opt-in and pinned to an explicit session. Do not
   scan transcripts or call models in the prompt-rendering command.
@@ -173,6 +175,6 @@ usage notes live in `assets/brand/`; the five studies remain in `docs/branding/c
 The selection does not authorize changing the existing panel or wordmark automatically.
 
 On 2026-09-11 the owner approved pushing the completed source as a development beta
-checkpoint, including the Starship summary and optional Vesper viewer integration.
+checkpoint, including the Starship summary and optional Tokenograph terminal viewer.
 This does not request a package release, license change, or promotion. Keep the synthetic
 README image until a more representative session is selected for a later walkthrough.

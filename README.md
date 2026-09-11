@@ -45,12 +45,29 @@ tokens, cache-hit ratio, cost, tool/error counts, the last named tool, and usage
 Estimated costs retain their `~`; unavailable usage or pricing is labelled.
 
 Follow the [Starship setup guide](integrations/starship/README.md) to add the custom
-module and source the zsh helper. Then, in an interactive terminal:
+module and source the zsh helper, then open a new terminal. To choose a session, run
+this from your Tokenograph checkout:
 
 ```zsh
-tg-on SESSION_ID_OR_PATH   # select a session and show its summary in this shell
-tg-off                    # hide the summary and stop this shell's collector
+python3 -m tokenograph list
 ```
+
+The list shows recent sessions with their time, agent, eight-character session ID,
+project, and opening prompt. Find the row for the conversation you want and copy its
+ID. For example, **if your list showed `a1b2c3d4`**, you would run:
+
+```zsh
+tg-on a1b2c3d4
+```
+
+For the newest session, you can skip the lookup and run `tg-on latest`. It selects the
+newest transcript across Claude Code, Codex, and pi once when enabled; it does not
+automatically follow whichever terminal or project you are working in. Run `tg-on`
+again with another ID to switch. If you already have a transcript file, its path also
+works: `tg-on "/path/to/session.jsonl"`.
+
+Run `tg-off` to hide the summary and stop its collector. If the list is empty, start a
+supported agent session on this machine first. Tokenograph reads local transcripts.
 
 Your normal typing prompt stays below the summary. Each terminal opts in separately
 and stays pinned to the session you selected. `tg-on` activates Starship in that shell,
@@ -61,8 +78,8 @@ configuration.
 **The summary refreshes when the shell redraws its prompt.** While Codex or Claude
 owns the terminal, its own input area remains in control; the Starship summary appears
 again when you return to the shell. For a continuously updating display during agent
-work, the separate [Vesper terminal viewer](integrations/vesper-viewer/README.md)
-provides a live strip alongside task activity and requires a compatible Vesper companion.
+work, the separate [Tokenograph terminal viewer](integrations/terminal-viewer/README.md)
+provides a live strip alongside task activity and requires a compatible local Codex companion.
 
 A background collector checks the selected transcript and writes a small local cache.
 Starship only reads that cache when drawing the prompt, keeping transcript analysis
@@ -106,7 +123,7 @@ moment they change.
 
 **Continuous terminal telemetry.** `python3 -m tokenograph.live SESSION --once` emits a
 snapshot for other frontends; omit `--once` to stream changes. The optional
-[Vesper terminal viewer](integrations/vesper-viewer/README.md) combines public task
+[Tokenograph terminal viewer](integrations/terminal-viewer/README.md) combines public task
 activity with a continuously updating Moonfly strip. It requires an existing compatible
 companion and Node.js; it is read-only and does not provide the native Codex input UI.
 Starship's summary redraws with the shell prompt; the separate viewer animates continuously.

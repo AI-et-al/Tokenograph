@@ -1,19 +1,20 @@
-# Optional Vesper terminal viewer
+# Tokenograph terminal viewer
 
-This is the read-only terminal frontend developed with the local Vesper companion.
+This optional read-only terminal frontend connects to a local Codex companion.
 It displays the selected Codex task's public responses and activity above a Moonfly
-Tokenograph strip. It needs an **already running, compatible Vesper companion**;
+Tokenograph strip. It needs an **already running, compatible local companion**;
 the voice backend, credentials, audio, and personal settings are not part of Tokenograph.
 Node.js 20+ is required for this optional viewer; Tokenograph itself remains Python
 standard library only.
 
 ```sh
-export VESPER_DATA_DIR="/absolute/path/to/vesper-companion/data"
-node integrations/vesper-viewer/watch.mjs
+export TOKENOGRAPH_COMPANION_DATA_DIR="/absolute/path/to/companion/data"
+node integrations/terminal-viewer/watch.mjs
 ```
 
-The directory must contain the companion's generated `launch.json`. Its loopback URL
-and local cookie authenticate read-only `/api/state` and `/api/events` requests. The
+The directory must contain the companion's generated `launch.json`. The viewer exchanges
+its loopback URL's token at `/api/unlock` for the companion's local cookie, then uses it
+to authenticate read-only `/api/state` and `/api/events` requests. The
 viewer never prints the cookie, sends a prompt, takes task ownership, or starts a voice
 session. Keep the data directory outside the repository. No API key is needed here.
 `TOKENOGRAPH_DIR` and `TOKENOGRAPH_PYTHON` can override the checkout and Python binary.
@@ -26,15 +27,15 @@ and per-tool token attribution are not invented. The monitor makes no model call
 
 Controls: Ctrl+O changes **this viewer's strip detail**; Page Up/Down scrolls the captured
 history; End returns to live; Ctrl+C closes only the viewer. This is not the native Codex
-TUI and has no keyboard prompt or private reasoning display. Speak or type in Vesper.
-Changing Vesper's selected task requires reopening the viewer; it never silently follows
+TUI and has no keyboard prompt or private reasoning display. Speak or type in the companion.
+Changing the companion's selected task requires reopening the viewer; it never silently follows
 another task. `--plain` uses scrolling text, and `--check` tests connectivity for six
 seconds without opening the fullscreen display.
 
 ```sh
-node --test integrations/vesper-viewer/tests/*.test.mjs
-VESPER_DATA_DIR="/absolute/path/to/vesper-companion/data" \
-  node integrations/vesper-viewer/watch.mjs --check
+node --test integrations/terminal-viewer/tests/*.test.mjs
+TOKENOGRAPH_COMPANION_DATA_DIR="/absolute/path/to/companion/data" \
+  node integrations/terminal-viewer/watch.mjs --check
 ```
 
 These files are a portable copy of the working companion frontend. The companion's

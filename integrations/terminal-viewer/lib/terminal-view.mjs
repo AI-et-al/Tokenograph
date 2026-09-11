@@ -7,11 +7,19 @@ export function plain(text) {
     .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g,'');
 }
 
-export function connection(launch) {
+export async function connection(launch,request=fetch) {
   const url=new URL(launch.url);
   if(url.protocol!=='http:'||url.hostname!=='127.0.0.1'||url.username||url.password||!/^#[a-f0-9]{64}$/.test(url.hash))
-    throw new Error('Invalid local Vesper launcher. Open Vesper first.');
-  return {origin:url.origin,headers:{Cookie:'vesper='+url.hash.slice(1)}};
+    throw new Error('Invalid local companion launcher. Open the companion first.');
+  // Obtain the companion's cookie instead of coupling the viewer to its name.
+  const response=await request(url.origin+'/api/unlock',{
+    method:'POST',headers:{Origin:url.origin,'Content-Type':'application/json'},
+    body:JSON.stringify({token:url.hash.slice(1)}),redirect:'error',signal:AbortSignal.timeout(5000),
+  });
+  const cookie=response.headers.get('set-cookie')?.split(';',1)[0];
+  if(!response.ok||!cookie||!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+=[a-f0-9]{64}$/.test(cookie)||cookie.slice(cookie.indexOf('=')+1)!==url.hash.slice(1))
+    throw new Error('Cannot authenticate the terminal viewer. Open the companion with its launcher.');
+  return {origin:url.origin,headers:{Cookie:cookie}};
 }
 
 export class EventDecoder {
@@ -24,7 +32,7 @@ export class EventDecoder {
       const data=block.split(/\r?\n/).filter(line=>line.startsWith('data:')).map(line=>line.slice(5).replace(/^ /,'')).join('\n');
       if(data){try{this.onEvent(JSON.parse(data));}catch(error){if(!(error instanceof SyntaxError))throw error;}}
     }
-    if(this.pending.length>2_000_000)throw new Error('Vesper sent an oversized event.');
+    if(this.pending.length>2_000_000)throw new Error('The companion sent an oversized event.');
   }
 }
 
@@ -54,7 +62,7 @@ export class TerminalView {
       this.activity=data.text||'Working';
       if(this.activity!==this.lastActivity&&!['Preparing a response','Codex is working.'].includes(this.activity))this.line('  '+this.activity,data.busy?'33':'32');
       this.lastActivity=this.activity;
-    } else if(type==='request')this.line('  Decision needed — use the controls in Vesper.','33');
+    } else if(type==='request')this.line('  Decision needed — use the controls in the companion.','33');
     else if(type==='notice')this.line('  '+(data.text||''),data.level==='error'?'31':'33');
     else if(type==='answer'&&data.status!=='completed')this.line('  Codex '+data.status+': '+(data.error||''),'31');
   }

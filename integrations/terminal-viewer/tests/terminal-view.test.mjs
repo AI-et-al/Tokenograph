@@ -12,10 +12,29 @@ test('terminal text cannot carry control sequences or recognizable keys',()=>{
   assert.equal(plain('\x1b[2Jhello\x1b]52;c;secret\x07\x07'),'hello');
   assert.equal(plain('sk-'+'a'.repeat(30)),'[REDACTED KEY]');
 });
-test('viewer only authenticates to the local companion',()=>{
+test('viewer only authenticates to the local companion',async()=>{
   const hash='#'+'a'.repeat(64);
-  assert.equal(connection({url:'http://127.0.0.1:4321/'+hash}).origin,'http://127.0.0.1:4321');
-  for(const url of ['https://example.com/'+hash,'http://127.0.0.1.evil/'+hash,'http://user@127.0.0.1/'+hash])assert.throws(()=>connection({url}),/Invalid/);
+  let calls=0;
+  const request=async(url,options)=>{
+    calls++;assert.equal(url,'http://127.0.0.1:4321/api/unlock');
+    assert.equal(options.method,'POST');assert.equal(options.redirect,'error');
+    assert.equal(options.headers.Origin,'http://127.0.0.1:4321');
+    assert.equal(options.headers['Content-Type'],'application/json');
+    assert.deepEqual(JSON.parse(options.body),{token:hash.slice(1)});
+    return new Response('{}',{headers:{'set-cookie':'local_session='+hash.slice(1)+'; HttpOnly; SameSite=Strict; Path=/'}});
+  };
+  const result=await connection({url:'http://127.0.0.1:4321/'+hash},request);
+  assert.equal(result.origin,'http://127.0.0.1:4321');
+  assert.equal(result.headers.Cookie,'local_session='+hash.slice(1));
+  for(const url of ['https://example.com/'+hash,'http://127.0.0.1.evil/'+hash,'http://user@127.0.0.1/'+hash])await assert.rejects(connection({url},request),/Invalid/);
+  assert.equal(calls,1);
+});
+test('viewer rejects missing, malformed, or mismatched authentication cookies',async()=>{
+  const token='a'.repeat(64),launch={url:'http://127.0.0.1:4321/#'+token};
+  for(const cookie of [undefined,'session=wrong','session='+'b'.repeat(64),'bad name='+token]){
+    await assert.rejects(connection(launch,async()=>new Response('{}',{headers:cookie?{'set-cookie':cookie}:{}})),/Cannot authenticate/);
+  }
+  await assert.rejects(connection(launch,async()=>new Response('{}',{status:403,headers:{'set-cookie':'session='+token}})),/Cannot authenticate/);
 });
 test('other thread output is excluded and voice paraphrases do not duplicate Codex output',()=>{
   let output='';const view=new TerminalView('ours',{write:t=>output+=t,isTTY:false});
