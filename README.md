@@ -1,118 +1,185 @@
 # Tokenograph
 
-Tokenometrics for coding-agent sessions. Point it at a Claude Code transcript, a Codex
-CLI rollout, or a pi session and it renders one page: throughput, an additive wall-clock
-split, token and cost accounting, a per-row timeline of every call, and a ledger of what is in the context
-window, what each part has cost, and why the cache was rebuilt. An optional Starship
-integration puts a session summary above your working shell prompt. Tokenograph also
-exports the session as a property graph and watches a whole fleet with herdr's states.
+Tokenograph reads the transcript a coding agent writes while it works and turns it into
+one page of numbers you can act on: how fast the model ran, where the wall-clock time
+went, what the session cost, what is in the context window right now, and when the
+prompt cache was lost and rebuilt. It reads Claude Code transcripts, Codex CLI rollouts
+and pi session files. Python standard library only, no build step, and analysis never
+calls a model or an API.
 
-[Starship prompt integration](#starship-prompt-integration) ·
-[Terminal usage](#using-it-from-the-terminal)
-
-![tokenograph on a synthetic 16-hour run](examples/sample-panel.png)
+![Tokenograph panel for a synthetic 16-hour run: stats row, activity timeline and context ledger](examples/sample-panel.png)
 
 It started as a clean-room equivalent of the run-stats panel Han Xiao posted for a
-16-hour autonomous coding run ([the post](https://x.com/hxiao/status/2095609195030864347)).
-Python standard library only, no build step.
+16-hour autonomous coding run ([Han Xiao's post on X](https://x.com/hxiao/status/2095609195030864347)).
 
-**Development beta snapshot — 2026-09-11.** The session panel, live terminal telemetry,
-tool details, and opt-in Starship summary are ready for continued use in our own sessions.
-This is a source checkpoint, not a package release. The image above remains a synthetic
-example; a more representative walkthrough will follow experience with another session.
-
-```
-python3 -m tokenograph list                          # Claude Code, Codex CLI and pi, newest first
-python3 -m tokenograph build latest -o panel.html    # self-contained HTML, open it anywhere
-python3 -m tokenograph serve latest --open           # live panel that follows a running session
-python3 -m tokenograph fleet --serve --open          # every session, herdr-style states, live
-python3 -m tokenograph graph latest -o s.graphml     # the session as a property graph
-python3 -m tokenograph json  <session-id-or-path>    # the computed numbers, for other frontends
-```
-
-`latest`, a session id prefix, a directory, or a path to a `.jsonl` all work. The format
-is detected from the file (`--format claude|codex|pi` to force it). Subagent transcripts stored
-next to a Claude Code session are merged in (`--no-subagents` to skip).
+**Development beta, 2026-09-11.** The session panel, live terminal telemetry, tool
+details and the opt-in Starship summary are in use in our own sessions. This is a source
+checkpoint, not a package release. The screenshot above is a synthetic run; a walkthrough
+of a real session will follow once one is chosen.
 
 Agents starting a session in this folder: read `AGENTS.md` first. The evidence behind
 every claim below is in `docs/field-notes.md`.
 
+## Contents
+
+- [What you need](#what-you-need)
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Words used on the page](#words-used-on-the-page)
+- [Starship prompt integration](#starship-prompt-integration)
+- [Terminal viewer](#terminal-viewer)
+- [Command reference](#command-reference)
+- [Supported harnesses](#supported-harnesses)
+- [The panel, card by card](#the-panel-card-by-card)
+- [How it works](#how-it-works)
+- [Fleet and herdr](#fleet-and-herdr)
+- [Graph export](#graph-export)
+- [What we learned building it](#what-we-learned-building-it)
+- [Roadmap](#roadmap)
+- [Data model](#data-model)
+- [Files](#files)
+- [Limitations](#limitations)
+- [License](#license)
+
+## What you need
+
+- **Python 3.8 or newer.** Nothing else is needed for the panel, the fleet view, and the
+  JSON and graph exports.
+- **A session from a supported agent** on this machine: Claude Code, Codex CLI or pi.
+  Tokenograph reads their local transcript files.
+- **Optional extras.** [Starship](https://starship.rs) and zsh for the prompt summary.
+  Node.js 20 or newer for the terminal viewer. [herdr](https://github.com/ogulcancelik/herdr)
+  for agent states in the fleet view.
+
+## Install
+
+Any of these works; none pulls in a dependency.
+
+```sh
+git clone https://github.com/AI-et-al/Tokenograph && cd Tokenograph
+python3 -m tokenograph --version              # run from the checkout, nothing to install
+pipx install .                                # or: pip install .  -> a `tokenograph` command
+pipx install --editable .                     # same, but edits to the checkout take effect
+pipx install git+https://github.com/AI-et-al/Tokenograph
+```
+
+The examples below use `tokenograph ...`. From a checkout without installing, substitute
+`python3 -m tokenograph ...`.
+
+## Quick start
+
+```sh
+tokenograph list                          # sessions on this machine, newest first
+tokenograph build latest -o panel.html    # one self-contained HTML file; open it anywhere
+tokenograph serve latest --open           # a live panel that follows a running session
+tokenograph fleet --serve --open          # every session, with herdr-style states, live
+tokenograph graph latest -o s.graphml     # the session as a property graph
+tokenograph json latest --pretty          # the computed numbers, for scripts and other frontends
+```
+
+Wherever a command takes a session, `latest`, a session id prefix, a directory, or a path
+to a `.jsonl` file all work. The format is detected from the file; `--format claude|codex|pi`
+forces it. Subagent transcripts stored next to a Claude Code session are merged in
+(`--no-subagents` to skip them).
+
+**Reading the panel.** Values marked `~` are estimates; everything else is measured from
+the transcript. Hover a label in the stats row for its definition. In the Context card,
+click a bar to inspect an earlier request, click a category row to expand its items, and
+read the rebuild list first: a rebuild is the single most expensive event a session can have.
+
+**Before sharing a report.** HTML, JSON and graph exports contain prompt and tool labels,
+commands, paths and other identifying metadata. They are not scrubbed. Keep reports
+private, or share the synthetic demo; a sharing-safe export is on the roadmap and not yet
+implemented.
+
+## Words used on the page
+
+Tokenograph uses the vocabulary of the model APIs. If these are new to you, this is
+enough to read the panel.
+
+- **Token.** The unit the model reads and writes, a few characters of text. Every count on
+  the page is in tokens.
+- **Context window.** Everything sent to the model on one request: the system prompt, the
+  tool definitions, the conversation so far and every tool result. The ring in the stats
+  row shows how full it is.
+- **Prompt cache, cache hit, cache rebuild.** The API keeps the beginning of the previous
+  request's window and charges a fraction of the price for the part that matches. Matching
+  is by prefix, so one changed byte early in the window means everything after it is
+  recomputed at full price. Tokenograph calls that a rebuild and names its likely cause.
+- **Prefill and decode, pp/s and tg/s.** Prefill is the model reading the prompt; decode is
+  the model writing its reply. pp/s is computed prompt tokens per second of prefill, and
+  tg/s is completion tokens per second of decode.
+- **Lap.** One user prompt and everything the agent did until the next one. An autonomous
+  loop that re-prompts itself makes one lap per iteration.
+- **Compaction.** The harness summarising the conversation to free space in the window.
+- **Ledger.** The table of what is in the window, by category and by item, and what each
+  category has cost over the session.
+- **`~`.** An estimate. Values without it are measured.
+
 ## Starship prompt integration
 
 Keep session usage visible **above the prompt you type into**. The optional Starship
-module adds a Moonfly-accented summary with the model and session, context usage, total
-tokens, cache-hit ratio, cost, tool/error counts, the last named tool, and usage age.
-Estimated costs retain their `~`; unavailable usage or pricing is labelled.
+module shows the model and session, context usage, total tokens, cache-hit ratio, cost,
+tool and error counts, the last named tool, and how old the usage is. Estimated costs keep
+their `~`; unavailable usage or pricing is labelled rather than shown as zero.
 
-Follow the [Starship setup guide](integrations/starship/README.md) to add the custom
-module and source the zsh helper, then open a new terminal. To choose a session, run
-this from your Tokenograph checkout:
+1. Follow the [Starship setup guide](integrations/starship/README.md): add the custom
+   module to `starship.toml`, source the zsh helper from `.zshrc`, then open a new terminal.
+2. List sessions and copy the eight-character id of the one you want:
 
-```zsh
-python3 -m tokenograph list
-```
+   ```sh
+   python3 -m tokenograph list
+   ```
 
-The list shows recent sessions with their time, agent, eight-character session ID,
-project, and opening prompt. Find the row for the conversation you want and copy its
-ID. For example, **if your list showed `a1b2c3d4`**, you would run:
+3. Turn the summary on in this terminal. If the list showed `a1b2c3d4`:
 
-```zsh
-tg-on a1b2c3d4
-```
+   ```zsh
+   tg-on a1b2c3d4
+   ```
 
-For the newest session, you can skip the lookup and run `tg-on latest`. It selects the
-newest transcript across Claude Code, Codex, and pi once when enabled; it does not
-automatically follow whichever terminal or project you are working in. Run `tg-on`
-again with another ID to switch. If you already have a transcript file, its path also
-works: `tg-on "/path/to/session.jsonl"`.
+   `tg-on latest` picks the newest transcript across Claude Code, Codex and pi once, when
+   you run it; it does not follow whichever terminal or project you move to. A transcript
+   path also works. Run `tg-on` again with another id to switch, and `tg-off` to stop.
 
-Run `tg-off` to hide the summary and stop its collector. If the list is empty, start a
-supported agent session on this machine first. Tokenograph reads local transcripts.
+How it behaves:
 
-Your normal typing prompt stays below the summary. Each terminal opts in separately
-and stays pinned to the session you selected. `tg-on` activates Starship in that shell,
-including when Powerlevel10k was loaded last; `tg-off` removes the summary, while
-Starship remains active until the shell closes. New terminals use your usual startup
-configuration.
+- **Each terminal opts in separately** and stays pinned to the session you chose. New
+  terminals use your usual startup configuration. `tg-on` activates Starship in that
+  shell, including when Powerlevel10k was loaded last; `tg-off` removes the summary, and
+  Starship stays active until the shell closes.
+- **The summary refreshes when the shell redraws its prompt.** While Codex or Claude owns
+  the terminal, its own input area is in control; the summary reappears when you get the
+  shell back. For a display that updates while the agent works, use the
+  [terminal viewer](#terminal-viewer).
+- **Nothing heavy runs in the prompt.** A background collector watches the chosen
+  transcript and writes a small local cache; Starship only reads that cache when it draws.
+  The cache holds counters and bounded model and tool names, never commands, prompts or
+  paths.
 
-**The summary refreshes when the shell redraws its prompt.** While Codex or Claude
-owns the terminal, its own input area remains in control; the Starship summary appears
-again when you return to the shell. For a continuously updating display during agent
-work, the separate [Tokenograph terminal viewer](integrations/terminal-viewer/README.md)
-provides a live strip alongside task activity and requires a compatible local Codex companion.
+## Terminal viewer
 
-A background collector checks the selected transcript and writes a small local cache.
-Starship only reads that cache when drawing the prompt, keeping transcript analysis
-and model calls out of the prompt command.
+`python3 -m tokenograph.live SESSION --once` prints one JSON snapshot of a session for
+other frontends; without `--once` it streams a new snapshot whenever the transcript
+changes. The optional [Tokenograph terminal viewer](integrations/terminal-viewer/README.md)
+builds on that stream: a continuously updating Moonfly-coloured strip under the public
+activity of a Codex task. It needs Node.js and an already running compatible local Codex
+companion. It is read-only, and it is not the native Codex input UI.
 
-## Using it from the terminal
-
-**Install.** Any of these works; none needs a dependency.
-
-```
-git clone https://github.com/AI-et-al/tokenograph && cd tokenograph
-python3 -m tokenograph --version              # run from the checkout
-pipx install .                                # or: pip install .  -> a `tokenograph` command
-pipx install --editable .                     # same, but edits to the checkout take effect
-pipx install git+https://github.com/AI-et-al/tokenograph
-```
-
-The examples below use `tokenograph ...`; substitute `python3 -m tokenograph ...` from a
-checkout.
+## Command reference
 
 **Find sessions.** Claude Code writes to `~/.claude/projects/<project>/<session>.jsonl`,
 Codex CLI to `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`, and pi to
-`~/.pi/agent/sessions/<cwd>/<stamp>_<id>.jsonl`. `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and
+`~/.pi/agent/sessions/<cwd>/<stamp>_<id>.jsonl`. `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and
 `PI_CODING_AGENT_DIR` are honoured.
 
-```
+```sh
 tokenograph list                # newest first: time, size, agent, id prefix, project, first prompt
 tokenograph list -n 50
 ```
 
 **Watch a session while it runs.** Open a second terminal next to the agent:
 
-```
+```sh
 tokenograph serve latest --open            # http://127.0.0.1:8787, follows the transcript
 tokenograph serve b5210cab --port 9000 --interval 5
 ```
@@ -121,35 +188,24 @@ The page polls the file; the spinner beside the context ring means live. Leave i
 for the whole run: the rebuild list and the re-sent-history line are most useful at the
 moment they change.
 
-**Continuous terminal telemetry.** `python3 -m tokenograph.live SESSION --once` emits a
-snapshot for other frontends; omit `--once` to stream changes. The optional
-[Tokenograph terminal viewer](integrations/terminal-viewer/README.md) combines public task
-activity with a continuously updating Moonfly strip. It requires an existing compatible
-companion and Node.js; it is read-only and does not provide the native Codex input UI.
-Starship's summary redraws with the shell prompt; the separate viewer animates continuously.
-
 **Report on a finished session.**
 
-```
+```sh
 tokenograph build latest -o panel.html                       # self-contained, open anywhere
 tokenograph build latest --title "16h port to the new runtime" -o port.html
 tokenograph build ~/.claude/projects/-home-me-app/1234abcd.jsonl -o app.html
 ```
 
-**Before sharing a report:** HTML, JSON, and graph exports can contain prompt/tool labels,
-commands, paths, and other identifying metadata. They are not scrubbed. Keep reports
-private or use the synthetic demo; the proposed sharing-safe export is not implemented yet.
-
 **Every session on the machine, with herdr's states.**
 
-```
+```sh
 tokenograph fleet --serve --open           # http://127.0.0.1:8788, rows link to live panels
 tokenograph fleet -o fleet.html --limit 50 # static snapshot
 ```
 
 **The numbers, for scripts and other frontends.**
 
-```
+```sh
 tokenograph json latest --pretty | jq .stats
 tokenograph json latest | jq '.ledger.events'          # cache rebuilds with causes
 tokenograph json latest | jq '.ledger.history'         # re-sent history
@@ -159,7 +215,7 @@ tokenograph json latest | jq '.ledger.cum.rows[:5]'    # most expensive categori
 
 **The session as a graph.**
 
-```
+```sh
 tokenograph graph latest -o session.graphml   # Gephi, yEd, igraph
 tokenograph graph latest -o session.json      # networkx.node_link_graph(data, edges="links")
 tokenograph graph latest -o session.csv       # session.nodes.csv + session.edges.csv for Neo4j
@@ -176,11 +232,6 @@ tokenograph graph latest -o session.csv       # session.nodes.csv + session.edge
 | `--no-subagents` | ignore subagent transcripts stored beside a Claude Code session |
 | `--port`, `--host`, `--interval` | serve options; interval is the browser poll in seconds |
 
-**Reading the panel.** Values with a `~` are estimates; hover a stats label for its
-definition. In the Context card, click a bar to inspect an earlier request, click a
-category row to expand its items, and read the rebuild list first: a rebuild is the
-single most expensive event a session can have.
-
 **Troubleshooting.**
 
 - `no sessions found`: check the paths above and the environment variables.
@@ -192,30 +243,30 @@ single most expensive event a session can have.
 - The fleet says herdr is not reachable: herdr is not running, or its socket is elsewhere;
   set `HERDR_SOCKET_PATH`, which herdr exports inside its panes.
 
-## Harnesses
+## Supported harnesses
 
 | harness | support | how to wire it |
 |---|---|---|
 | Claude Code | native | nothing to do; transcripts are read from `~/.claude/projects` |
 | Codex CLI | native | nothing to do; rollouts are read from `~/.codex/sessions` (or `$CODEX_HOME/sessions`) |
 | pi | native | nothing to do; sessions are read from `~/.pi/agent/sessions` |
-| herdr | fleet join | its harness integrations report each pane's own session id; `tokenograph fleet` joins Claude Code, Codex CLI, and pi rows on that id and shows herdr's status next to its own |
+| herdr | fleet join | its harness integrations report each pane's own session id; `tokenograph fleet` joins Claude Code, Codex CLI and pi rows on that id and shows herdr's status next to its own |
 | OpenCode, Gemini CLI, Cursor, aider | not yet | each writes a session log; see "Adding an adapter" |
 | llama.cpp, SGLang, vLLM servers | not yet | the server's per-request timings would make tg/s and pp/s measured instead of estimated; an adapter over the server log or a logging proxy is the path |
 
 What each format records decides what can be measured:
 
-- Claude Code writes one entry per streamed block with a timestamp and exact usage, the
+- **Claude Code** writes one entry per streamed block with a timestamp and exact usage, the
   full system prompt, every injected reminder, and compaction markers. Everything in the
   ledger is possible because of that.
-- Codex CLI writes timestamped `response_item` records and per-request `last_token_usage`
+- **Codex CLI** writes timestamped `response_item` records and per-request `last_token_usage`
   inside cumulative `token_count` events. Input includes cached and cache-write subsets;
   reasoning is encrypted, so only `reasoning_output_tokens` is usable. Older resumed
   rollouts replay history before the latest `task_started`; newer versions may also write
   a provisional `token_usage_record`, committed only when its delayed `token_count`
   matches. The adapter handles both, but no plaintext reasoning ledger item can be
   reconstructed.
-- pi writes one entry per message with start and end times, usage including its own cost,
+- **pi** writes one entry per message with start and end times, usage including its own cost,
   tool results, compactions and model changes, but no system prompt and no per-block
   timing. So for pi the prefill split is a latency fit and the system prompt appears
   under "tool schemas & unmeasured". pi's recorded cost is shown next to the estimate;
@@ -228,7 +279,7 @@ compactions, and ledger items with a category and a size. Add the format to
 `detect_format` and `iter_sessions`. Everything downstream, phases, ledger, graph, fleet,
 is shared. The hand-built transcripts in `tests/` show the minimum each field needs.
 
-## The panel
+## The panel, card by card
 
 **Stats.** tg/s (completion tokens per second of decode time), pp/s (computed prompt
 tokens per second of prefill time), laps (one per user prompt; an autonomous loop that
@@ -240,6 +291,9 @@ completion. COST, when the model's pricing is known: output, cache writes (at th
 or 1-hour write premium the API reported), cache reads (at the read discount), uncached
 input. `--price IN,OUT[,READ_MULT,WRITE5M_MULT,WRITE1H_MULT]` overrides the built-in table,
 which is a dated snapshot.
+
+<details>
+<summary>Where the OpenAI prices come from</summary>
 
 The OpenAI rows were checked on 2026-09-04 against the official model pages for
 [gpt-5.6-sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol),
@@ -259,18 +313,20 @@ These are Standard API list-price equivalents, not Codex subscription invoices. 
 without an exact cited row remains unpriced and the panel footer says so; `--price` is the
 only opt-in override.
 
+</details>
+
 **Activity.** One row per category over wall-clock time: an "All activity" strip, laps
 numbered in order, the three assistant phases, one row per tool name, compactions,
 interrupts and errors, idle stretches. Hover any bar for the call behind it; drag to zoom,
 double-click to reset. In `serve` mode the page follows the transcript and the spinner
 next to the ring shows it is live.
 
-For Codex rollouts that record structured tool completions, **Tool details** identifies
-the tools inside orchestration batches: commands, named MCP tools, web actions, and file
-edits. Expand a tool for completion times, reported durations, outcomes, and bounded
-command/argument previews. Earlier calls can be revealed in batches of 20. Expansion
-choices survive live refreshes. The additional timeline rows use completion ticks;
-they do not infer unreported start times. These detail records do not add duplicate
+**Tool details.** For Codex rollouts that record structured tool completions, this card
+identifies the tools inside orchestration batches: commands, named MCP tools, web actions,
+and file edits. Expand a tool for completion times, reported durations, outcomes, and
+bounded command and argument previews. Earlier calls can be revealed in batches of 20, and
+expansion choices survive live refreshes. The additional timeline rows use completion
+ticks; they do not infer unreported start times. These detail records do not add duplicate
 tokens, dollars, calls, or wall time to the existing accounting. Context-ledger dollars
 remain attributed to the transcript's outer calls when finer attribution is unavailable.
 
@@ -304,8 +360,8 @@ API's measured input total drawn over it, and three tables:
   Timestamped Codex output and paired tools remain visible even without confirmed usage
   (for example after an interruption), in static and live views. Only confirmed usage
   enters token/cost totals and the measured context ledger; totals may therefore be partial.
-  The footer discloses incomplete usage and throughput is withheld rather than dividing
-  partial token counts by the duration of all observed activity.
+  The footer discloses incomplete usage, and throughput divides confirmed tokens by the
+  confirmed calls' own time rather than by the duration of all observed activity.
   pi writes one entry per message; the message carries the request's start time and the
   entry its end.
 - **Tool calls.** A `tool_use` block is paired with the `tool_result` carrying its id.
@@ -367,21 +423,21 @@ shows which tools were loaded solo, at which request, and how many requests re-s
 
 ## Fleet and herdr
 
-`tokenograph fleet` lists every Claude Code, Codex CLI, and pi session on the machine with a state in
-[herdr](https://github.com/ogulcancelik/herdr)'s vocabulary, derived from the transcript
-tail: **working** (producing or running a tool), **blocked** (a tool call has waited more
-than 20 s for its result, usually a permission prompt or a question), **done** (the turn
-ended and nobody has prompted since), **idle**. Each row shows laps, wall clock, context
-fill, computed and cached tokens, output, estimated cost and last activity; in `--serve`
-mode the rows link to live per-session panels.
+`tokenograph fleet` lists every Claude Code, Codex CLI and pi session on the machine with a
+state in [herdr](https://github.com/ogulcancelik/herdr)'s vocabulary, derived from the
+transcript tail: **working** (producing or running a tool), **blocked** (a tool call has
+waited more than 20 s for its result, usually a permission prompt or a question), **done**
+(the turn ended and nobody has prompted since), **idle**. Each row shows laps, wall clock,
+context fill, computed and cached tokens, output, estimated cost and last activity; in
+`--serve` mode the rows link to live per-session panels.
 
 When herdr is running, tokenograph also asks it. herdr exposes a newline-delimited JSON
 socket at `$XDG_CONFIG_HOME/herdr/herdr.sock` (or `~/.config/herdr/herdr.sock`, or the
 `HERDR_SOCKET_PATH` a pane inherits); `agent.list` returns every pane's agent, its
 detected status and the agent's own session id, which herdr's harness integrations report
-at session start. tokenograph joins on that id (falling back to a
-unique working directory) and shows herdr's status next to its own, with herdr's driving
-the ordering. Nothing is written to herdr.
+at session start. tokenograph joins on that id (falling back to a unique working
+directory) and shows herdr's status next to its own, with herdr's driving the ordering.
+Nothing is written to herdr.
 
 ## Graph export
 
@@ -392,7 +448,7 @@ is present in every request with a token weight. `tokenograph graph` writes that
 as node-link JSON (`networkx.node_link_graph(data, edges="links")`), GraphML (Gephi,
 yEd, igraph) or a CSV pair for Neo4j's importer.
 
-```
+```text
 session -has_lap-> lap -next-> lap
 lap -contains-> request -follows-> request        weight: tokens served from cache
 request -invokes-> tool -feeds-> request          weight: result tokens entering the next request
@@ -429,8 +485,8 @@ The [working roadmap](docs/roadmap.md) is a big-picture lens, not a launch sched
 The near-term goal is usefulness in our own sessions. If wider sharing becomes a goal,
 the optional path is:
 
-1. License/attribution, CI and installation checks, explicit missing-data coverage, and
-   sharing-safe exports across all formats.
+1. CI and installation checks, explicit missing-data coverage, and sharing-safe exports
+   across all formats.
 2. A small public beta with a synthetic demo and evidence of repeat use.
 3. Explainable, offline advice and outcome-aware before/after comparisons.
 4. Faster fleet analysis or additional adapters when beta users demonstrate a need.
@@ -443,7 +499,7 @@ including exact token calibration and measured server timings, remain in
 
 `tokenograph json` emits what the page renders:
 
-```
+```text
 meta    title, agent (claude-code | codex | pi), adapter labels, session id, models, cwd, branch, estimates used
 base    session start (epoch seconds); all times below are relative to it
 stats   tg_s, pp_s, laps, avg_lap_s, time{...}, tokens{...}, context{...}, counts{...},
@@ -456,6 +512,7 @@ tools   per-name count, total seconds, errors
 idle    [t0,t1,'w'|'o'] waiting-for-user or overhead
 ledger  cpt, cpt_prose, tool_block_hint, series[{t,m,in,cc,cr,g{category:tokens}}],
         now{rows[...]}, cum{rows[...],computed,cached,requests}, events[...], tools{...}
+tool_details  recorded Codex tool completions: id, name, label, detail, completed_at, duration_s, status
 ```
 
 `stats.counts.assistant_unmetered` counts observed Codex calls without confirmed usage;
@@ -469,18 +526,24 @@ same stats plus `state`, `herdr` (status, pane, workspace, name) and `age_s`.
 
 ## Files
 
-```
-tokenograph/__init__.py   adapters (Claude Code, Codex CLI, pi), metrics, ledger, fleet, CLI
-tokenograph/panel.html    the session page; build inlines the data into it
-tokenograph/fleet.html    the fleet page
-examples/make_sample.py  synthetic 16h transcript generator with ground-truth timings
-examples/sample-panel.png    the panel built from that synthetic run (screenshot above)
-tests/                   python3 -m unittest discover -s tests
+```text
+tokenograph/__init__.py        adapters (Claude Code, Codex CLI, pi), metrics, ledger, graph, fleet, CLI
+tokenograph/panel.html         the session page; build inlines the data into it
+tokenograph/fleet.html         the fleet page
+tokenograph/live.py            read-only JSON telemetry stream for terminal frontends
+tokenograph/prompt.py          the Starship summary: cache writer, collector and reader
+integrations/starship/         Starship module, zsh helpers and setup guide
+integrations/terminal-viewer/  optional Node.js terminal viewer and its tests
+examples/make_sample.py        synthetic 16h transcript generator with ground-truth timings
+examples/sample-panel.png      the panel built from that synthetic run (screenshot above)
+docs/                          field notes, roadmap, adapter reviews, branding studies
+assets/brand/                  the Context Loop mark and favicons
+tests/                         python3 -m unittest discover -s tests (runs the Node suites too when node is present)
 ```
 
 To reproduce the screenshot without a real session:
 
-```
+```sh
 python3 examples/make_sample.py --hours 16 --laps 99 --out /tmp/sample.jsonl
 python3 -m tokenograph build /tmp/sample.jsonl --title "16h long-horizon task on model porting" -o sample.html
 ```
@@ -497,3 +560,11 @@ python3 -m tokenograph build /tmp/sample.jsonl --title "16h long-horizon task on
   platforms; an unknown model is left unpriced unless `--price` is supplied.
 - Cost is attributed to categories by token share, which is the only split the usage
   counters support.
+- Analysis makes no network requests, but the panel and fleet pages ask Google Fonts for
+  two typefaces when opened with network access and fall back to system fonts without it.
+- The `serve` and `fleet --serve` servers bind to loopback and have no authentication; they
+  are for your own machine, not for exposure to a network.
+
+## License
+
+Tokenograph is released under the [MIT License](LICENSE).

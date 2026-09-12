@@ -2350,11 +2350,20 @@ def analyze(main_entries, sub_streams=(), *, title=None, context_window=None, li
     if unmetered_models:
         pricing_note += (f" {len(unmetered_models)} observed Codex call(s) have no confirmed usage; "
                          "token and cost totals cover confirmed calls only. Their prefill/decode "
-                         "split is not separable; throughput is unavailable with partial usage.")
+                         "split is not separable; throughput covers confirmed calls only.")
 
+    # Throughput comes from matched sets. Without unmetered calls the partitioned phase
+    # totals and the confirmed tokens cover the same calls. With them, divide confirmed
+    # tokens by the confirmed calls' own phase durations, so an in-flight or interrupted
+    # request neither inflates the denominator nor blanks the figure for the session.
+    if unmetered_models:
+        tp_decode = sum(c["ph"][1] + c["ph"][2] for c in metered_models)
+        tp_prefill = sum(c["ph"][0] for c in metered_models)
+    else:
+        tp_decode, tp_prefill = decode_time, prefill_time
     stats = {
-        "tg_s": (tok_out / decode_time) if decode_time > 0 and not unmetered_models else None,
-        "pp_s": (tok_computed / prefill_time) if prefill_time > 0 and not unmetered_models else None,
+        "tg_s": (tok_out / tp_decode) if tp_decode > 0 else None,
+        "pp_s": (tok_computed / tp_prefill) if tp_prefill > 0 else None,
         "laps": len(laps),
         "avg_lap_s": (sum(lp["t1"] - lp["t0"] for lp in laps) / len(laps)) if laps else None,
         "time": {"wall": wall, "prefill": prefill_time, "reasoning": totals["reasoning"],

@@ -20,7 +20,8 @@ python3 -m tokenograph serve latest --open
 python3 -m tokenograph fleet --serve --open
 python3 -m tokenograph graph latest -o s.graphml
 python3 -m tokenograph json latest --pretty
-python3 -m unittest discover -s tests          # must pass before any push
+python3 -m unittest discover -s tests          # must pass before any push; runs the Node suites too when node is present
+node --test tests/test_panel_state.mjs integrations/terminal-viewer/tests/*.test.mjs   # the JavaScript suites alone
 ```
 
 ## Layout
@@ -35,6 +36,7 @@ integrations/             Starship helpers and optional Tokenograph terminal vie
 examples/make_sample.py   synthetic transcript generator with ground-truth timings (the test oracle)
 tests/                    unittest; hand-built transcripts for all formats, a fake herdr socket
 docs/field-notes.md       evidence, method, paper notes, the numbers behind the claims
+LICENSE                   MIT, the owner's choice on 2026-09-11
 ```
 
 ## Invariants: do not break these
@@ -166,9 +168,10 @@ id that herdr's integrations report at session start. The fleet joins on that.
 `docs/roadmap.md` is the owner's accepted big-picture lens, not a launch schedule.
 There is no short-term urgency to promote it: improve its usefulness in our own sessions
 first. Wider sharing is an option, with trust/privacy/distribution safeguards before any
-beta; advice and expansion should follow demonstrated use. Publication and a license
-choice still require explicit owner approval. Preserve this direction unless the owner
-revises it; do not turn the optional release milestones into an unsolicited launch project.
+beta; advice and expansion should follow demonstrated use. The license is MIT, chosen by
+the owner on 2026-09-11 (`LICENSE`, mirrored in `pyproject.toml`). Publication as a package
+still requires explicit owner approval. Preserve this direction unless the owner revises
+it; do not turn the optional release milestones into an unsolicited launch project.
 
 The owner selected the **Context Loop** icon (concept 1) on 2026-09-05. Final assets and
 usage notes live in `assets/brand/`; the five studies remain in `docs/branding/concepts/`.

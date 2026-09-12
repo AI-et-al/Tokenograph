@@ -676,10 +676,13 @@ class CodexAdapterTests(unittest.TestCase):
         last = [call for call in payload["calls"] if call["k"] == "m"][-1]
 
         self.assertEqual(last["p"], [last["t0"], last["t1"]])
-        self.assertIsNone(payload["stats"]["tg_s"])
-        self.assertIsNone(payload["stats"]["pp_s"])
+        # Throughput is a matched set: confirmed tokens over the confirmed calls' own
+        # phase time, so the unmetered call neither blanks it nor changes it.
+        self.assertAlmostEqual(payload["stats"]["tg_s"], baseline["stats"]["tg_s"], delta=1e-3)
+        self.assertAlmostEqual(payload["stats"]["pp_s"], baseline["stats"]["pp_s"], delta=1e-3)
         self.assertEqual(payload["stats"]["counts"]["assistant_unmetered"], 1)
         self.assertIn("totals cover confirmed calls only", payload["meta"]["pricing_note"])
+        self.assertIn("throughput covers confirmed calls only", payload["meta"]["pricing_note"])
         self.assertEqual(payload["stats"]["tokens"], baseline["stats"]["tokens"])
         self.assertEqual(payload["stats"]["cost"], baseline["stats"]["cost"])
 
